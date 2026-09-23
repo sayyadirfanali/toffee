@@ -1,30 +1,14 @@
 module Main where
 
 import Test.HUnit
+import Text.Megaparsec.Pos
+import Data.Either (isRight, isLeft)
 
-import Control.Monad
-import Control.Monad.State
-import Data.Either
-import System.IO
+import qualified LexerTests as L
+import qualified LayoutTests as Y
+import System.Exit
 
-import Text.Megaparsec
-import Test.HUnit.Base
-
-import Lexer
-import Parser
-
-type LexRes = Either (ParseErrorBundle String String) [TokInfo]
-
-equalLex :: String -> LexRes -> Test
-equalLex s e = runLex >>= (@?= e)
-
-boolLex :: String -> (LexRes -> Bool) -> Test
-boolLex s p = runLex >>= \a -> p a @? ""
-
-null = TestList
-  [
-    equalLex "null" (Right (TLit (LNull "null"))),
-    boolLex  "nil"  (\e -> isLeft e)
-  ]
-
-main = runTestTT t
+main :: IO Counts
+main = do
+  c <- runTestTT (TestList [TestLabel "lexer" L.tests, TestLabel "layout" Y.tests])
+  if errors c + failures c > 0 then exitFailure else exitSuccess

@@ -13,3 +13,5 @@ isFollowedBy :: MonadParsec e s m => m a -> m Bool
 isFollowedBy p = do
   b <- optional (lookAhead p)
   return (isJust b)
+
+repl = replicate

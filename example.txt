@@ -1,0 +1,8 @@
+{ x: 1, y: 2 }
+{ x, y: 2 }
+{ ...x, y: 2 }
+{ x, [y]: 2 }
+"venus" + 2
+f?.(1)
+a == b < c
+if a then b else c + 1

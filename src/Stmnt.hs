@@ -10,7 +10,8 @@ import qualified Expr as E
 data Stmnt 
   = SExpr   E.Expr
   | SBlock  [Stmnt]
-  | SDecl   E.Expr Stmnt
+  | SDecl   E.Expr E.Expr
+  | SIf     E.Expr Stmnt (Maybe Stmnt)
   deriving (Eq, Show)
 
 expr :: Parser Stmnt
@@ -23,8 +24,8 @@ decl = do
   keyP "let"
   e <- E.expr
   symP "="
-  s <- stmnt
-  return (SDecl e s)
+  f <- E.expr
+  return (SDecl e f)
 
 block :: Parser Stmnt
 block = do
@@ -36,7 +37,8 @@ block = do
   close
   return (SBlock xs)
 
-stmnt = choice . fmap (uncurry dbg) $ ps
+stmnt :: Parser Stmnt
+stmnt = choice (fmap (uncurry dbg) $ ps)
   where
   ps = [
       ("block", block)

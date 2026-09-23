@@ -7,112 +7,231 @@ import Text.Megaparsec.Debug
 import Utils
 import Lexer
 import Parser
+import Data.Function ((&))
 
-data Expr
-  = ELit    Lit
-  | EIden   String
-  | EArr    [Expr]
-  | EObj    [(Expr, Expr)]
-  | EMem    Expr Expr
-  | ELam    [Expr] Expr
-  | EApp    Expr [Expr]
-  | EUnOp   String Expr
-  | EBinOp  String Expr Expr
+data UnOp = Neg | Pos | Not | TypeOf | Void | Await
+  deriving (Eq, Ord, Show, Enum, Bounded)
+
+unop2str :: UnOp -> String
+unop2str op = case op of
+  Neg    -> "-"
+  Pos    -> "+"
+  Not    -> "!"
+  TypeOf -> "typeof"
+  Void   -> "void"
+  Await  -> "await"
+
+data BinOp
+  = Add | Sub | Mul | Div | Mod | Pow
+  | Lt | Lte | Gt | Gte | InstanceOf
+  | Eq | Neq
+  | BAnd | BOr | BXor | Shl | Shr | Ushr
+  | And | Or | Coalesce
+  deriving (Eq, Ord, Show, Enum, Bounded)
+
+binop2str :: BinOp -> String
+binop2str op = case op of
+  Add        -> "+"
+  Sub        -> "-"
+  Mul        -> "*"
+  Div        -> "/"
+  Mod        -> "%"
+  Pow        -> "**"
+  Lt         -> "<"
+  Lte        -> "<="
+  Gt         -> ">"
+  Gte        -> ">="
+  InstanceOf -> "instanceof"
+  Eq         -> "=="
+  Neq        -> "/="
+  BAnd       -> "&"
+  BOr        -> "|"
+  BXor       -> "^"
+  Shl        -> "<<"
+  Shr        -> ">>"
+  Ushr       -> ">>>"
+  And        -> "&&"
+  Or         -> "||"
+  Coalesce   -> "??"
+
+data ArrElem = AESpread Expr | AEPlain  Expr
   deriving (Eq, Ord, Show)
 
-lit :: Parser Expr
-lit = do
-  TLit x <- satisfyP (consP "Lit")
-  return (ELit x)
+newtype ObjKey = ObjKey String
+  deriving (Eq, Ord, Show)
 
-string :: Parser Expr
-string = do
-  TLit s <- satisfyP isStr
-  return (ELit s)
-  where 
-  isStr (TLit (LStr _)) = True
-  isStr _               = False
+data ObjField
+  = OFSpread    Expr
+  | OFKeyVal    ObjKey Expr
+  | OFShort     Ident
+  | OFComputed  Expr Expr
+  deriving (Eq, Ord, Show)
 
-iden :: Parser Expr
-iden = do
-  TIden s <- satisfyP (consP "Iden")
-  return (EIden s)
+newtype Ident = Ident String
+  deriving (Eq, Ord, Show)
 
-arr :: Parser Expr
-arr = do
-  xs <- parenP (sepBy expr commaP)
-  return (EArr xs)
+newtype MemName = MemName String
+  deriving (Eq, Ord, Show)
 
-obj :: Parser Expr
-obj = do
-  xs <- curlyP (sepBy keyval commaP)
-  return (EObj xs)
+data Expr
+  = ELit        Lit
+  | EIden       Ident
+
+  | EArr        [ArrElem]
+  | EObj        [ObjField]
+  | ELam        [Ident] Expr
+
+  | EMem        Expr MemName
+  | EOptMem     Expr MemName
+
+  | EApp        Expr [Expr]
+  | EOptApp     Expr [Expr]
+
+  | EIndex      Expr Expr
+  | EOptIndex   Expr Expr
+
+  | ENew        Expr [Expr]
+  | ENonNull    Expr
+
+  | EUnOp       UnOp Expr
+  | EBinOp      BinOp Expr Expr
+
+  | EIfThen     Expr Expr Expr
+  deriving (Eq, Ord, Show)
+
+-- identifier or key (needed for member fields and object keys)
+nameP :: Parser String
+nameP = matchP getName
   where
-  keyval  = do
-    k <- iden <|> string
-    symP ":"
-    v <- expr
-    return (k, v)
+    getName (TIden s) = Just s
+    getName (TKey s)  = Just s
+    getName _         = Nothing
 
-lam :: Parser Expr
-lam = do
+litP :: Parser Lit
+litP = matchP getLit
+  where
+    getLit (TLit l) = Just l
+    getLit _        = Nothing
+
+litE :: Parser Expr
+litE = label "literal" $
+  ELit <$> litP
+
+identP :: Parser Ident
+identP = matchP getIden
+  where
+    getIden (TIden s) = Just (Ident s)
+    getIden _         = Nothing
+
+identE :: Parser Expr
+identE = label "identifier" $ EIden <$> identP
+
+arrE :: Parser Expr
+arrE = label "array" $ 
+  EArr <$> squareP (sepBy (spread <|> plain) commaP)
+  where
+    spread = AESpread <$> (symP "..." *> expr)
+    plain  = AEPlain <$> expr
+
+objE :: Parser Expr
+objE = label "object" $
+  EObj <$> curlyP (sepBy (keyVal <|> short <|> spread <|> computed) commaP)
+  where
+  key = ObjKey <$> (nameP <|> stringP)
+  col  = symP ":"
+  dots = symP "..."
+  keyVal   = OFKeyVal   <$> (try $ key <* col) <*> expr
+  short    = OFShort    <$> (identP <* notFollowedBy col)
+  spread   = OFSpread   <$> (dots *> expr)
+  computed = OFComputed <$> ((squareP expr) <* col) <*> expr
+
+lamE :: Parser Expr
+lamE = label "lambda" $ do
   keyP "fn"
-  args <- many iden
+  args <- parenP $ sepBy identP commaP
   symP "->"
   body <- expr
-  return (ELam args body)
+  return $ ELam args body
 
-app :: Parser Expr
-app = do
-  x  <- try (p <* o)
-  xs <- sepBy expr commaP <* c
-  return (EApp x xs)
-  where
-  p = iden <|> parenP expr
-  o = bracketP '('
-  c = bracketP ')'
+ifthenE :: Parser Expr
+ifthenE = label "if then" $ do
+  keyP "if"
+  cond <- expr
+  keyP "then"
+  expThen <- expr
+  keyP "else"
+  expElse <- expr
+  return $ EIfThen cond expThen expElse
 
-mem :: Parser Expr
-mem = do
-  x  <- try (p <* s)
-  xs <- sepBy p s
-  return (foldl EMem x xs)
-  where
-    p = app <|> iden <|> parenP expr
-    s = symP "."
+memE :: Parser (Expr -> Expr)
+memE = label "member" $ do
+  symP "."
+  m <- (MemName <$> nameP)
+  return $ \x -> EMem x m
 
-op :: Parser Expr
-op = do
-  let pre  = choice . fmap symP $ [ "+", "-" ]
-      post = choice . fmap symP $ [ "+", "-", "*", "/", "<", ">" ]
-  try . lookAhead $ (pre *> term) <|> (term <* post)
-  makeExprParser term table
-  where
-  term     = choice [ iden, lit, parenP expr ]
-  unop s   = symP s *> return (EUnOp s)
-  binop s  = symP s *> return (EBinOp s)
-  table    = [
-        [ Postfix (unop "--"),  Postfix (unop "++") ]
-      , [ Prefix  (unop "--"),  Prefix  (unop "++") ]
-      , [ Prefix  (unop "-") ]
-      , [ InfixL  (binop "*"),  InfixL (binop "/")  ]
-      , [ InfixL  (binop "+"),  InfixL (binop "-")  ]
-      , [
-          InfixL  (binop "<"),  InfixL (binop ">"),
-          InfixL  (binop "=<"), InfixL (binop ">=")
-        ]
+appE :: Parser (Expr -> Expr)
+appE = label "application" $ flip EApp <$> (parenP $ sepBy expr commaP)
+
+indexE :: Parser (Expr -> Expr)
+indexE = label "index" $ flip EIndex <$> (squareP expr)
+
+optPostE :: Parser (Expr -> Expr)
+optPostE = label "optional" $ do
+  symP "?."
+  choice [
+      flip EOptMem   <$> (MemName <$> nameP)
+    , flip EOptApp   <$> (parenP $ sepBy expr commaP)
+    , flip EOptIndex <$> (squareP expr)
     ]
+
+nonNullE :: Parser (Expr -> Expr)
+nonNullE = label "non null" $ do
+  symP "!"
+  return $ \x -> ENonNull x
+
+postfixE :: Parser Expr
+postfixE = do
+  prim  <- choice [ identE, litE, arrE, objE, newE, parenP expr ]
+  postL <- many $ choice ([ optPostE, memE, appE, indexE, nonNullE ])
+  return $ foldl (&) prim postL
+
+newE = label "new" $
+  keyP "new" *> (ENew <$> newPostFixE <*> (parenP $ sepBy expr commaP))
+
+-- `newPrim` produced same as `prim` in `postfixE` (minus `newE`)
+-- `newPostL` avoids `appE` because `new Widget(x, y)` means `ENew Widget [x, y]` and not `ENew (EApp Widget [x, y]) []`
+newPostFixE :: Parser Expr
+newPostFixE = do
+  newPrim  <- choice [ identE, litE, parenP expr, arrE, objE ]
+  newPostL <- many $ choice [ memE, indexE ]
+  return $ foldl (&) newPrim newPostL
+
+opE :: Parser Expr
+opE = makeExprParser postfixE table
+  where
+    unop  op = EUnOp op <$ symP (unop2str op)
+    kunop op = EUnOp op <$ keyP (unop2str op)
+    binop op = EBinOp op <$ symP (binop2str op)
+    kbin  op = EBinOp op <$ keyP (binop2str op)
+
+    prefixop = Prefix $ choice $ [ unop Neg, unop Pos, unop Not ] <> [ kunop TypeOf, kunop Void, kunop Await ]
+
+    table =
+      [ [ prefixop ]
+      , [ InfixR (binop Pow) ]
+      , [ InfixL (binop Mul), InfixL (binop Div), InfixL (binop Mod) ]
+      , [ InfixL (binop Add), InfixL (binop Sub) ]
+      , [ InfixL (binop Shl), InfixL (binop Shr), InfixL (binop Ushr) ]
+      , [ InfixN (binop Lt), InfixN (binop Lte), InfixN (binop Gt), InfixN (binop Gte)
+        , InfixN (kbin InstanceOf) ]
+      , [ InfixN (binop Eq), InfixN (binop Neq) ]
+      , [ InfixL (binop BAnd) ]
+      , [ InfixL (binop BXor) ]
+      , [ InfixL (binop BOr) ]
+      , [ InfixR (binop And) ]
+      , [ InfixR (binop Or) ]
+      , [ InfixR (binop Coalesce) ]
+      ]
 
 expr :: Parser Expr
-expr = choice . fmap (uncurry dbg) $ ps
-  where
-  ps = [
-        ("lam",  lam)
-      , ("app",  app)
-      , ("mem",  mem)
-      , ("op",   op)
-      , ("iden", iden)
-      , ("arr",  arr)
-      , ("obj",  obj)
-      , ("lit",  lit)
-    ]
+expr = choice [ lamE, ifthenE, opE ]

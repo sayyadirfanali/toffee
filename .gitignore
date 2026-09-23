@@ -1,2 +1,3 @@
-*.txt
 dist-newstyle/
+*.md
+*.txt

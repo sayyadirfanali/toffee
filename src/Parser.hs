@@ -2,53 +2,56 @@ module Parser where
 
 import Data.Void
 import Text.Megaparsec
+import qualified Data.Set as Set
 
 import Utils
 import Lexer
 
 type Parser = ParsecT Void [TokInfo] IO
 
-satisfyP :: (Tok -> Bool) -> Parser Tok
-satisfyP p = satisfy (p . tokVal) >>= return . tokVal
+satisfyP :: (Tok -> Bool) -> Parser TokInfo
+satisfyP p = satisfy (p . tokVal)
+
+matchP :: (Tok -> Maybe a) -> Parser a
+matchP f = token (f . tokVal) Set.empty
+
+posP :: Parser SourcePos
+posP = tokStart <$> lookAhead anySingle
 
 singleP :: Tok -> Parser Tok
-singleP t = satisfyP (== t)
+singleP t = (tokVal <$> satisfyP (== t)) <?> tokDat t
 
-consP :: String -> Tok -> Bool
-consP  "Lit"         (TLit _)      = True
-consP  "Sym"         (TSym _)      = True
-consP  "Key"         (TKey _)      = True
-consP  "Iden"        (TIden _)     = True
-consP  "Bracket"     (TBracket _)  = True
-consP  "SemiColon"   TSemiColon    = True
-consP  "EOF"         TEOF          = True
-consP  _ _                         = False
+symP :: String -> Parser String
+symP s = s <$ singleP (TSym s)
 
-symP :: String -> Parser Tok
-symP s = satisfyP (== TSym s)
+keyP :: String -> Parser String
+keyP k = k <$ singleP (TKey k)
 
-keyP :: String -> Parser Tok
-keyP s = satisfyP (== TKey s)
+stringP :: Parser String
+stringP = matchP getStr
+  where 
+    getStr (TLit (LStr s)) = Just s
+    getStr _               = Nothing
 
-bracketP ::  Char -> Parser Tok
-bracketP s = satisfyP (== TBracket s)
+bracketP :: Char -> Parser Char
+bracketP c = c <$ singleP (TBracket c)
 
-commaP ::  Parser Tok
+commaP :: Parser String
 commaP = symP ","
 
 semicolonP :: Parser Tok
-semicolonP = satisfyP (consP "SemiColon")
-
-parenP :: Parser a -> Parser a
-parenP = between (singleP (TBracket '(')) (singleP (TBracket ')'))
-
-curlyP :: Parser a -> Parser a
-curlyP = between (singleP (TBracket '{')) (singleP (TBracket '}'))
-
-squareP :: Parser a -> Parser a
-squareP = between (singleP (TBracket '[')) (singleP (TBracket ']'))
+semicolonP = singleP TSemiColon
 
 eofP :: Parser Tok
-eofP = satisfyP (consP "EOF")
+eofP = label "eof" $ singleP TEOF
+
+parenP :: Parser a -> Parser a
+parenP = between (bracketP '(') (bracketP ')')
+
+curlyP :: Parser a -> Parser a
+curlyP = between (bracketP '{') (bracketP '}')
+
+squareP :: Parser a -> Parser a
+squareP = between (bracketP '[') (bracketP ']')
 
 runParse p = runParserT p ""
