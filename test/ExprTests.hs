@@ -55,11 +55,11 @@ parenTest inp exp = TestCase $ do
     Right out  -> paren out @?= exp
   where
     paren :: Expr -> String
-    paren (ELit l)          = litDat l
+    paren (ELit l) = litDat l
     paren (EIden (Ident s)) = s
-    paren (EUnOp op x)      = "(" <> unop2str op <> " " <> paren x <> ")"
-    paren (EBinOp op a b)   = "(" <> paren a <> " " <> binop2str op <> " " <> paren b <> ")"
-    paren e                 = show e
+    paren (EUnOp op x) = "(" <> unop2str op <> " " <> paren x <> ")"
+    paren (EBinOp op a b) = "(" <> paren a <> " " <> binop2str op <> " " <> paren b <> ")"
+    paren e = show e
 
 astTest :: String -> Expr -> Test
 astTest inp exp = TestCase $ do
@@ -103,7 +103,7 @@ tests = TestList $
   , astTest "f()" (EApp (EIden (Ident "f")) [])
   , astTest "x" (EIden (Ident "x"))
   , astTest "42" (ELit (LNum "42"))
-  , astTest "fn(x, y) -> x" (ELam [Ident "x", Ident "y"] (EIden (Ident "x")))
+  , astTest "fn(x, y) => x" (ELam [(Ident "x", Nothing), (Ident "y", Nothing)] (EIden (Ident "x")))
   , astTest "if a then b else c" (EIfThen (EIden (Ident "a")) (EIden (Ident "b")) (EIden (Ident "c")))
   , astTest "[1, ...xs, 2]" (EArr [AEPlain  (ELit (LNum "1")), AESpread (EIden (Ident "xs")), AEPlain  (ELit (LNum "2")) ])
   , astTest "{ a: 1, b, ...c, [d]: e }"
@@ -133,14 +133,14 @@ tests = TestList $
   , astTest "new a.b.C(x)"
       (ENew (EMem (EMem (EIden (Ident "a")) (MemName "b")) (MemName "C"))
             [EIden (Ident "x")])
-  , astTest "fn() -> x" (ELam [] (EIden (Ident "x")))
-  , astTest "fn(x) -> fn(y) -> x"
-      (ELam [Ident "x"] (ELam [Ident "y"] (EIden (Ident "x"))))
+  , astTest "fn() => x" (ELam [] (EIden (Ident "x")))
+  , astTest "fn(x) => fn(y) => x"
+      (ELam [(Ident "x", Nothing)] (ELam [(Ident "y", Nothing)] (EIden (Ident "x"))))
   , astTest "if a then b else if c then d else e"
       (EIfThen (EIden (Ident "a")) (EIden (Ident "b"))
         (EIfThen (EIden (Ident "c")) (EIden (Ident "d")) (EIden (Ident "e"))))
 
-  , failTest "fn -> x"
+  , failTest "fn => x"
   , failTest "if a then b"
 
   , astTest "let x = 1" (EDecl LetDecl (EIden (Ident "x")) (ELit (LNum "1")))

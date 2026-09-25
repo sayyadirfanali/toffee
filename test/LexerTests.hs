@@ -138,19 +138,26 @@ tests = TestList $
 
   , lexTest "// just a comment"  []
   , lexTest "x // c1\n// c2\ny"  [TIden "x", TIden "y"]
-  ]
-  <>
-  [
-    lexFail "\"unterminated"
+
+  , lexFail "\"unterminated"
   , lexFail "'unterminated"
-  ]
-  <>
-  [
-    TestCase $ do
+
+  , TestCase $ do
       let Right ts = runLex "x\ny"
       fmap (unPos . sourceLine . tokStart) ts @?= [1, 2, 2]
 
   , TestCase $ do
       let Right ts = runLex "  x"
       fmap (unPos . sourceColumn . tokStart) (take 1 ts) @?= [3]
+  ]
+  <>
+  [
+    lexTest "type"       [TKey "type"]
+  , lexTest "forall"     [TKey "forall"]
+  , lexTest "typed"      [TIden "typed"]
+  , lexTest "forallx"    [TIden "forallx"]
+  , lexTest "=>"         [TSym "=>"]
+  , lexTest "b?: B"      [TIden "b", TSym "?", TSym ":", TIden "B"]
+  , lexTest "T[]"        [TIden "T", oq, cq]
+  , lexTest "forall T. fn(x: T) => T" [TKey "forall", TIden "T", TSym ".", TKey "fn", op, TIden "x", TSym ":", TIden "T", cp, TSym "=>", TIden "T"]
   ]

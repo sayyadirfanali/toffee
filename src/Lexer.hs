@@ -150,7 +150,7 @@ symL = label "symbol" $ do
   s <- choice (fmap string ops)
   return $ TSym s
 
-keys = words "instanceof satisfies await const typeof where else then void new let as do fn if"
+keys = words "instanceof satisfies forall await const typeof where else then void type new let as do fn if"
 
 keyL :: Lexer Tok
 keyL = label "keyword" $ do

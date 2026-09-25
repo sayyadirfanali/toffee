@@ -5,6 +5,7 @@ import Test.HUnit
 import Lexer (Tok(TEOF, TKey, TIden), TokInfo(tokVal), runLex, sm, oa, ca, ob, cb, op, cp, oq, cq, dk, wk)
 import Layout
 import Text.Megaparsec.Pos (SourcePos(..), unPos)
+import Lexer (Tok(..))
 
 layTest :: String -> [Tok] -> Test
 layTest s expected = TestCase $
@@ -23,18 +24,24 @@ layFail s = TestCase $
       Right ts' -> assertFailure ("expected layout failure on " <> show s <> ", got " <> show (fmap tokVal ts'))
 
 tests :: Test
-tests = TestList
+tests = TestList $
   [
-    layTest "x"                         [oa, TIden "x", ca, TEOF]
-  , layTest "a\nb\nc"                   [oa, TIden "a", sm, TIden "b", sm, TIden "c", ca, TEOF]
-  , layTest "do\n  a\n  b"              [oa, dk, oa, TIden "a", sm, TIden "b", ca, ca, TEOF]
-  , layTest "where\n  a"                [oa, wk, oa, TIden "a", ca, ca, TEOF]
-  , layTest "do\n  a\n  do\n    b"      [oa, dk, oa, TIden "a", sm, dk, oa, TIden "b", ca, ca, ca, TEOF]
-  , layTest "do { a; b }"               [oa, dk, ob, TIden "a", sm, TIden "b", cb, ca, TEOF]
-  , layTest "do { a\n b }"              [oa, dk, ob, TIden "a", TIden "b", cb, ca, TEOF]
+    layTest "x" [oa, TIden "x", ca, TEOF]
+  , layTest "a\nb\nc" [oa, TIden "a", sm, TIden "b", sm, TIden "c", ca, TEOF]
+  , layTest "do\n  a\n  b" [oa, dk, oa, TIden "a", sm, TIden "b", ca, ca, TEOF]
+  , layTest "where\n  a" [oa, wk, oa, TIden "a", ca, ca, TEOF]
+  , layTest "do\n  a\n  do\n    b" [oa, dk, oa, TIden "a", sm, dk, oa, TIden "b", ca, ca, ca, TEOF]
+  , layTest "do { a; b }" [oa, dk, ob, TIden "a", sm, TIden "b", cb, ca, TEOF]
+  , layTest "do { a\n b }" [oa, dk, ob, TIden "a", TIden "b", cb, ca, TEOF]
   , layTest "do\n  a\n  do\n    b\n  c" [oa, dk, oa, TIden "a", sm, dk, oa, TIden "b", ca, sm, TIden "c", ca, ca, TEOF]
-  , layTest "x\ndo\ny"                  [oa, TIden "x", sm, dk, oa, ca, sm, TIden "y", ca, TEOF]
+  , layTest "x\ndo\ny" [oa, TIden "x", sm, dk, oa, ca, sm, TIden "y", ca, TEOF]
 
   , layFail "}"
   , layFail "do { a"
+  ]
+  <>
+  [
+    layTest "A\n  | B" [oa, TIden "A", TSym "|", TIden "B", ca, TEOF]
+  , layTest "A\n| B" [oa, TIden "A", sm, TSym "|", TIden "B", ca, TEOF]
+  , layTest "{\n  a: A\n}" [oa, ob, TIden "a", TSym ":", TIden "A", cb, ca, TEOF]
   ]

@@ -55,9 +55,10 @@ test-suite test
   type: exitcode-stdio-1.0
   main-is: Test.hs
   other-modules:
-    ExprTests
     LayoutTests
     LexerTests
+    ExprTests
+    TypeTests
   build-depends:
     HUnit,
     base,

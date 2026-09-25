@@ -8,6 +8,7 @@ import Utils
 import Lexer
 import Parser
 import Data.Function ((&))
+import Data.Maybe (isJust)
 
 data UnOp = Neg | Pos | Not | TypeOf | Void | Await
   deriving (Eq, Ord, Show, Enum, Bounded)
@@ -54,7 +55,7 @@ binop2str op = case op of
   Or         -> "||"
   Coalesce   -> "??"
 
-data ArrElem = AESpread Expr | AEPlain  Expr
+data ArrElem = AESpread Expr | AEPlain Expr
   deriving (Eq, Ord, Show)
 
 newtype ObjKey = ObjKey String
@@ -88,7 +89,7 @@ data Expr
 
   | EArr        [ArrElem]
   | EObj        [ObjField]
-  | ELam        [Ident] Expr
+  | ELam        [(Ident, Maybe TExpr)] Expr
 
   | EMem        Expr MemName
   | EOptMem     Expr MemName
@@ -109,9 +110,12 @@ data Expr
 
   | EDecl       DeclTyp Expr Expr
   | EBlock      BlockTyp BlockKey [Expr]
+
+  | ETypeDecl   Ident [Ident] TExpr
   deriving (Eq, Ord, Show)
 
--- identifier or key (needed for member fields and object keys)
+-- name = identifier | key
+-- member fields and object keys can be both
 nameP :: Parser String
 nameP = matchP getName
   where
@@ -160,10 +164,12 @@ objE = label "object" $
 lamE :: Parser Expr
 lamE = label "lambda" $ do
   keyP "fn"
-  args <- parenP $ sepBy identP commaP
-  symP "->"
+  args <- parenP $ sepBy argP commaP
+  symP "=>"
   body <- exprE
   return $ ELam args body
+  where
+    argP = (,) <$> identP <*> (optional $ symP ":" *> texprE)
 
 ifthenE :: Parser Expr
 ifthenE = label "if then" $ do
@@ -261,5 +267,117 @@ declE = do
   exp <- exprE
   return (EDecl (if key == "let" then LetDecl else ConstDecl) pat exp)
 
-exprE :: Parser Expr
+typeDeclE :: Parser Expr
+typeDeclE = label "type declaration" $ do
+  keyP "type"
+  name <- identP
+  params <- option [] (parenP $ sepBy identP commaP)
+  symP "="
+  ETypeDecl name params <$> texprE
+
 exprE = choice [ lamE, ifthenE, blockE, declE, opE ]
+
+data TUnOp
+  = TReadOnly
+  deriving (Eq, Ord, Show, Enum, Bounded)
+
+data TBinOp
+  = TUnion
+  | TInter
+  deriving (Eq, Ord, Show, Enum, Bounded)
+
+data TTupElem
+  = TTEPlain TExpr
+  | TTEKeyVal Ident TExpr
+  | TTEKeyValOpt Ident TExpr
+  | TTESpread TExpr
+  deriving (Eq, Ord, Show)
+
+data TObjField
+  = TOFKeyVal Ident Bool TExpr
+  deriving (Eq, Ord, Show)
+
+data TFuncParam
+  = TFPIdTyp Ident Bool TExpr
+  deriving (Eq, Ord, Show)
+
+newtype Raw = Raw String
+  deriving (Eq, Ord, Show)
+
+data TExpr
+  = TELit Lit
+  | TEApp [Ident] [TExpr]
+  | TEArr TExpr -- T[]
+  | TETuple [TTupElem]
+  | TEUnOp TUnOp TExpr
+  | TEBinOp TBinOp TExpr TExpr
+  | TEObj [TObjField]
+  | TEFunc [Ident] [TFuncParam] TExpr
+  | TECond TExpr TExpr TExpr
+  | TERaw Raw
+  deriving (Eq, Ord, Show)
+
+tlitE :: Parser TExpr
+tlitE = label "type literal" $ TELit <$> litP
+
+tkwE :: Parser TExpr
+tkwE = label "type keyword" $ (\k -> TEApp [Ident k] []) <$> keyP "void"
+
+tarrE :: Parser (TExpr -> TExpr)
+tarrE = label "type array" $ TEArr <$ (bracketP '[' *> bracketP ']')
+
+trefE :: Parser TExpr
+trefE = label "type name" $ do
+  name <- sepBy1 identP (symP ".")
+  args <- option [] (parenP $ sepBy texprE commaP)
+  return $ TEApp name args
+
+ttupE :: Parser TExpr
+ttupE = label "type tuple" $
+  TETuple <$> squareP (sepBy (TTEPlain <$> texprE) commaP)
+
+tobjE :: Parser TExpr
+tobjE = label "type object" $
+  TEObj <$> curlyP (sepBy field commaP)
+  where
+    field = TOFKeyVal <$> (Ident <$> nameP) <*> (isJust <$> optional (symP "?")) <* symP ":" <*> texprE
+
+tforallE :: Parser TExpr
+tforallE = label "forall" $ do
+  keyP "forall"
+  vs <- some identP
+  symP "."
+  tfuncE vs
+
+tfuncE :: [Ident] -> Parser TExpr
+tfuncE vs = label "function type" $ do
+  keyP "fn"
+  ps  <- parenP $ sepBy param commaP
+  symP "=>"
+  ret <- texprE
+  return (TEFunc vs ps ret)
+  where
+    param = TFPIdTyp <$> identP <*> ((isJust <$> optional (symP "?"))) <* symP ":" <*> texprE
+
+trawE :: Parser TExpr
+trawE = label "raw type" $ (TERaw . Raw) <$> (keyP "raw" *> stringP)
+
+tprimE :: Parser TExpr
+tprimE = choice [ trefE, tkwE, tlitE, ttupE, tobjE, trawE, parenP texprE ]
+
+tpostE :: Parser TExpr
+tpostE = do
+  prim  <- tprimE
+  postL <- many tarrE
+  return $ foldl (&) prim postL
+
+topE :: Parser TExpr
+topE = makeExprParser tpostE table
+  where
+    binop op s = InfixL (TEBinOp op <$ symP s)
+    table =
+      [ [ binop TInter "&" ]
+      , [ binop TUnion "|" ]
+      ]
+texprE :: Parser TExpr
+texprE = choice [ tforallE, tfuncE [], topE ]
