@@ -11,26 +11,18 @@ dropEOF ts = case last ts of
   _    -> ts
 
 lexTest :: String -> [Tok] -> Test
-lexTest s expected = TestCase $ do
-  r <- return $ runLex s
-  case r of
-    Left e   -> assertFailure ("lex failed on " <> show s <> ": " <> show e)
-    Right ts -> dropEOF (fmap tokVal ts) @?= expected
+lexTest inp exp = TestCase $ do
+  res <- return $ runLex inp
+  case res of
+    Left err  -> assertFailure ("lex failed on " <> show inp <> ": " <> show err)
+    Right out -> dropEOF (fmap tokVal out) @?= exp
 
 lexFail :: String -> Test
-lexFail s = TestCase $ do
-  r <- return $ runLex s
+lexFail inp = TestCase $ do
+  r <- return $ runLex inp
   case r of
-    Left _   -> return ()
-    Right ts -> assertFailure ("expected lex failure on " <> show s <> ", got " <> show (fmap tokVal ts))
-
-semi = TSemiColon
-ob = TBracket '{'
-cb = TBracket '}'
-op = TBracket '('
-cp = TBracket ')'
-oq = TBracket '['
-cq = TBracket ']'
+    Left _    -> return ()
+    Right out -> assertFailure ("expected lex failure on " <> show inp <> ", got " <> show (fmap tokVal out))
 
 tests :: Test
 tests = TestList $
@@ -79,19 +71,12 @@ tests = TestList $
   , lexTest "constant" [TIden "constant"]
   , lexTest "fnord"    [TIden "fnord"]
   , lexTest "wherein"  [TIden "wherein"]
+  , lexTest "typeofx"  [TIden "typeofx"]
   , lexTest "if_"      [TIden "if_"]
 
   , lexTest "if(x)"    [TKey "if", op, TIden "x", cp]
 
-
-  , lexTest "("  [op]
-  , lexTest ")"  [cp]
-  , lexTest "["  [oq]
-  , lexTest "]"  [cq]
-  , lexTest "{"  [ob]
-
-  , lexTest ";"   [semi]
-  , lexTest "a;b" [TIden "a", semi, TIden "b"]
+  , lexTest "a;b" [TIden "a", sm, TIden "b"]
 
   , lexTest "  x"          [TIden "x"]
   , lexTest "\tx"          [TIden "x"]
@@ -149,7 +134,7 @@ tests = TestList $
   , lexTest "\"a\" + \"b\" == `c`"
       [TLit (LStr "a"), TSym "+", TLit (LStr "b"), TSym "==", TLit (LStr "c")]
 
-  , lexTest "do { let x = 1; x }" [TKey "do", ob, TKey "let", TIden "x", TSym "=", TLit (LNum "1"), semi, TIden "x", cb]
+  , lexTest "do { let x = 1; x }" [TKey "do", ob, TKey "let", TIden "x", TSym "=", TLit (LNum "1"), sm, TIden "x", cb]
 
   , lexTest "// just a comment"  []
   , lexTest "x // c1\n// c2\ny"  [TIden "x", TIden "y"]

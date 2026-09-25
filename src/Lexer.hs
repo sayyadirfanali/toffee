@@ -62,6 +62,18 @@ data Tok
   | TLayAngle Int
   deriving (Eq, Ord, Show)
 
+sm = TSemiColon
+oa = TBracket '<'
+ca = TBracket '>'
+ob = TBracket '{'
+cb = TBracket '}'
+op = TBracket '('
+cp = TBracket ')'
+oq = TBracket '['
+cq = TBracket ']'
+dk = TKey "do"
+wk = TKey "where"
+
 data Lit
   = LNull String
   | LBool String
@@ -69,6 +81,13 @@ data Lit
   | LStr String
   | LReg String
   deriving (Eq, Ord, Show)
+
+litDat :: Lit -> String
+litDat (LNum s)  = s
+litDat (LStr s)  = show s
+litDat (LBool s) = s
+litDat (LNull s) = s
+litDat (LReg s)  = s
 
 tokDat :: Tok -> String
 tokDat (TLit (LNull s)) = s

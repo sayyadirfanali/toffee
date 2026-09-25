@@ -38,7 +38,7 @@ section :: String -> IO ()
 section name = putStrLn ("--- " ++ name ++ " ---")
 
 topP :: P.Parser [E.Expr]
-topP = P.bracketP '<' *> sepEndBy E.expr P.semicolonP <* P.bracketP '>' <* P.eofP
+topP = P.bracketP '<' *> sepEndBy E.exprE P.semicolonP <* P.bracketP '>' <* P.eofP
 
 report :: [L.TokInfo] -> ParseError [L.TokInfo] Void -> IO ()
 report toks err = do

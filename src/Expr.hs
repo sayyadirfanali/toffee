@@ -73,6 +73,15 @@ newtype Ident = Ident String
 newtype MemName = MemName String
   deriving (Eq, Ord, Show)
 
+data DeclTyp = LetDecl | ConstDecl
+  deriving (Eq, Ord, Show)
+
+data BlockTyp = Expl | Impl
+  deriving (Eq, Ord, Show)
+
+newtype BlockKey = BlockKey String
+  deriving (Eq, Ord, Show)
+
 data Expr
   = ELit        Lit
   | EIden       Ident
@@ -97,6 +106,9 @@ data Expr
   | EBinOp      BinOp Expr Expr
 
   | EIfThen     Expr Expr Expr
+
+  | EDecl       DeclTyp Expr Expr
+  | EBlock      BlockTyp BlockKey [Expr]
   deriving (Eq, Ord, Show)
 
 -- identifier or key (needed for member fields and object keys)
@@ -130,8 +142,8 @@ arrE :: Parser Expr
 arrE = label "array" $ 
   EArr <$> squareP (sepBy (spread <|> plain) commaP)
   where
-    spread = AESpread <$> (symP "..." *> expr)
-    plain  = AEPlain <$> expr
+    spread = AESpread <$> (symP "..." *> exprE)
+    plain  = AEPlain <$> exprE
 
 objE :: Parser Expr
 objE = label "object" $
@@ -140,27 +152,27 @@ objE = label "object" $
   key = ObjKey <$> (nameP <|> stringP)
   col  = symP ":"
   dots = symP "..."
-  keyVal   = OFKeyVal   <$> (try $ key <* col) <*> expr
+  keyVal   = OFKeyVal   <$> (try $ key <* col) <*> exprE
   short    = OFShort    <$> (identP <* notFollowedBy col)
-  spread   = OFSpread   <$> (dots *> expr)
-  computed = OFComputed <$> ((squareP expr) <* col) <*> expr
+  spread   = OFSpread   <$> (dots *> exprE)
+  computed = OFComputed <$> ((squareP exprE) <* col) <*> exprE
 
 lamE :: Parser Expr
 lamE = label "lambda" $ do
   keyP "fn"
   args <- parenP $ sepBy identP commaP
   symP "->"
-  body <- expr
+  body <- exprE
   return $ ELam args body
 
 ifthenE :: Parser Expr
 ifthenE = label "if then" $ do
   keyP "if"
-  cond <- expr
+  cond <- exprE
   keyP "then"
-  expThen <- expr
+  expThen <- exprE
   keyP "else"
-  expElse <- expr
+  expElse <- exprE
   return $ EIfThen cond expThen expElse
 
 memE :: Parser (Expr -> Expr)
@@ -170,18 +182,18 @@ memE = label "member" $ do
   return $ \x -> EMem x m
 
 appE :: Parser (Expr -> Expr)
-appE = label "application" $ flip EApp <$> (parenP $ sepBy expr commaP)
+appE = label "application" $ flip EApp <$> (parenP $ sepBy exprE commaP)
 
 indexE :: Parser (Expr -> Expr)
-indexE = label "index" $ flip EIndex <$> (squareP expr)
+indexE = label "index" $ flip EIndex <$> (squareP exprE)
 
 optPostE :: Parser (Expr -> Expr)
 optPostE = label "optional" $ do
   symP "?."
   choice [
       flip EOptMem   <$> (MemName <$> nameP)
-    , flip EOptApp   <$> (parenP $ sepBy expr commaP)
-    , flip EOptIndex <$> (squareP expr)
+    , flip EOptApp   <$> (parenP $ sepBy exprE commaP)
+    , flip EOptIndex <$> (squareP exprE)
     ]
 
 nonNullE :: Parser (Expr -> Expr)
@@ -191,18 +203,18 @@ nonNullE = label "non null" $ do
 
 postfixE :: Parser Expr
 postfixE = do
-  prim  <- choice [ identE, litE, arrE, objE, newE, parenP expr ]
+  prim  <- choice [ identE, litE, arrE, objE, newE, parenP exprE ]
   postL <- many $ choice ([ optPostE, memE, appE, indexE, nonNullE ])
   return $ foldl (&) prim postL
 
 newE = label "new" $
-  keyP "new" *> (ENew <$> newPostFixE <*> (parenP $ sepBy expr commaP))
+  keyP "new" *> (ENew <$> newPostFixE <*> (parenP $ sepBy exprE commaP))
 
 -- `newPrim` produced same as `prim` in `postfixE` (minus `newE`)
 -- `newPostL` avoids `appE` because `new Widget(x, y)` means `ENew Widget [x, y]` and not `ENew (EApp Widget [x, y]) []`
 newPostFixE :: Parser Expr
 newPostFixE = do
-  newPrim  <- choice [ identE, litE, parenP expr, arrE, objE ]
+  newPrim  <- choice [ identE, litE, parenP exprE, arrE, objE ]
   newPostL <- many $ choice [ memE, indexE ]
   return $ foldl (&) newPrim newPostL
 
@@ -214,7 +226,7 @@ opE = makeExprParser postfixE table
     binop op = EBinOp op <$ symP (binop2str op)
     kbin  op = EBinOp op <$ keyP (binop2str op)
 
-    prefixop = Prefix $ choice $ [ unop Neg, unop Pos, unop Not ] <> [ kunop TypeOf, kunop Void, kunop Await ]
+    prefixop = Prefix $ foldr1 (.) <$> (some . choice $ [ unop Neg, unop Pos, unop Not ] <> [ kunop TypeOf, kunop Void, kunop Await ])
 
     table =
       [ [ prefixop ]
@@ -233,5 +245,21 @@ opE = makeExprParser postfixE table
       , [ InfixR (binop Coalesce) ]
       ]
 
-expr :: Parser Expr
-expr = choice [ lamE, ifthenE, opE ]
+blockE :: Parser Expr
+blockE = do
+  k <- choice . fmap keyP $ [ "where", "do" ]
+  b <- bracketP '<' <|> bracketP '{'
+  xs <- sepEndBy exprE semicolonP
+  if b == '<' then bracketP '>' else bracketP '}'
+  return (EBlock (if b == '<' then Impl else Expl) (BlockKey k) xs)
+
+declE :: Parser Expr
+declE = do
+  key <- keyP "let" <|> keyP "const"
+  pat <- exprE -- remember to filter later (every expr is not a valid pattern)
+  symP "="
+  exp <- exprE
+  return (EDecl (if key == "let" then LetDecl else ConstDecl) pat exp)
+
+exprE :: Parser Expr
+exprE = choice [ lamE, ifthenE, blockE, declE, opE ]
