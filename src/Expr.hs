@@ -44,7 +44,7 @@ binop2str op = case op of
   Gte        -> ">="
   InstanceOf -> "instanceof"
   Eq         -> "=="
-  Neq        -> "/="
+  Neq        -> "!="
   BAnd       -> "&"
   BOr        -> "|"
   BXor       -> "^"
@@ -55,23 +55,99 @@ binop2str op = case op of
   Or         -> "||"
   Coalesce   -> "??"
 
-data ArrElem = AESpread Expr | AEPlain Expr
+data AssignOp
+  = AEq | AAdd | ASub | AMul | ADiv | AMod | APow
+  | AShl | AShr | AUshr
+  | ABoolAnd | ABoolOr | ABoolXor
+  | AAnd | AOr | ACoalesce
+  deriving (Eq, Ord, Show, Enum, Bounded)
+
+assignop2str :: AssignOp -> String
+assignop2str op = case op of
+  AEq       -> "="
+  AAdd      -> "+="
+  ASub      -> "-="
+  AMul      -> "*="
+  ADiv      -> "/="
+  AMod      -> "%="
+  APow      -> "**="
+  AShl      -> "<<="
+  AShr      -> ">>="
+  AUshr     -> ">>>="
+  ABoolAnd  -> "&="
+  ABoolOr   -> "|="
+  ABoolXor  -> "^="
+  AAnd      -> "&&="
+  AOr       -> "||="
+  ACoalesce -> "??="
+
+-- `Ident` is any binding (variable, parameter, type) but never be a keyword (eg, `if`, `type`)
+newtype Ident = Ident String
   deriving (Eq, Ord, Show)
 
-newtype ObjKey = ObjKey String
+-- `MemName` is whatever can follow member access markers `.` or `?.` (this includes keywords, eg, `window.type` is valid)
+data MemName
+  = MNPub  String
+  | MNPriv String  -- `#xyz`
+  deriving (Eq, Ord, Show)
+
+-- `PropKey` is whatever name a property can take where it is *defined* (strictly larger than `MemName`)
+data PropKey
+  = PKMem  MemName -- see above
+  | PKStr  String
+  | PKNum  String
+  | PKComp Expr -- [Symbol.iterator]
+  deriving (Eq, Ord, Show)
+
+data Elem
+  = ElemPlain Expr
+  | ElemSpread Expr -- `...x`
+  deriving (Eq, Ord, Show)
+
+data LamParam
+  = LPPlain Ident (Maybe TExpr) (Maybe Expr)
+  | LPRest  Ident (Maybe TExpr)
   deriving (Eq, Ord, Show)
 
 data ObjField
   = OFSpread    Expr
-  | OFKeyVal    ObjKey Expr
+  | OFKeyVal    PropKey Expr
   | OFShort     Ident
-  | OFComputed  Expr Expr
+  | OFShortInit Ident Expr
   deriving (Eq, Ord, Show)
 
-newtype Ident = Ident String
+data MemMod
+  = MMStatic
+  | MMProtected
+  | MMReadonly
+  | MMAbstract
+  | MMOverride
+  deriving (Eq, Ord, Show, Enum, Bounded)
+
+data ClassMem
+  = CMField
+  { cmMods  :: [MemMod]
+  , cmProp  :: PropKey
+  , cmIsOpt :: Bool
+  , cmMType :: Maybe TExpr
+  , cmMVal  :: Maybe Expr
+  }
+  | CMethod
+  { cmMods    :: [MemMod]
+  , cmProp    :: PropKey
+  , cmFuncSig :: FuncSig
+  , cmMBody   :: Maybe Expr
+  }
   deriving (Eq, Ord, Show)
 
-newtype MemName = MemName String
+data ClassDecl = ClassDecl
+  { cdAbstract :: Bool
+  , cdName     :: Maybe Ident -- denotes anonymous class if `Nothing`
+  , cdParams   :: [Ident]
+  , cdExtends  :: Maybe TExpr
+  , cdImpls    :: [TExpr]
+  , cdMembers  :: [ClassMem]
+  }
   deriving (Eq, Ord, Show)
 
 data DeclTyp = LetDecl | ConstDecl
@@ -83,24 +159,31 @@ data BlockTyp = Expl | Impl
 newtype BlockKey = BlockKey String
   deriving (Eq, Ord, Show)
 
+data FuncSig = FuncSig
+  { fsVars   :: [Ident]
+  , fsParams :: [LamParam]
+  , fsRet    :: Maybe TExpr
+  }
+  deriving (Eq, Ord, Show)
+
 data Expr
   = ELit        Lit
   | EIden       Ident
 
-  | EArr        [ArrElem]
+  | EArr        [Elem]
   | EObj        [ObjField]
-  | ELam        [(Ident, Maybe TExpr)] Expr
+  | ELam        FuncSig Expr
 
   | EMem        Expr MemName
   | EOptMem     Expr MemName
 
-  | EApp        Expr [Expr]
-  | EOptApp     Expr [Expr]
+  | EApp        Expr [Elem]
+  | EOptApp     Expr [Elem]
 
   | EIndex      Expr Expr
   | EOptIndex   Expr Expr
 
-  | ENew        Expr [Expr]
+  | ENew        Expr [Elem]
   | ENonNull    Expr
 
   | EUnOp       UnOp Expr
@@ -108,68 +191,144 @@ data Expr
 
   | EIfThen     Expr Expr Expr
 
-  | EDecl       DeclTyp Expr Expr
+  | EAssign     AssignOp Expr Expr
+
+  | EClass      ClassDecl
+  | EDecl       DeclTyp Expr (Maybe TExpr) Expr
   | EBlock      BlockTyp BlockKey [Expr]
 
   | ETypeDecl   Ident [Ident] TExpr
   deriving (Eq, Ord, Show)
 
--- name = identifier | key
--- member fields and object keys can be both
-nameP :: Parser String
-nameP = matchP getName
-  where
-    getName (TIden s) = Just s
-    getName (TKey s)  = Just s
-    getName _         = Nothing
+colP :: Parser String
+colP = symP ":"
+
+dotsP :: Parser String
+dotsP = symP "..."
+
+fatP :: Parser String
+fatP = symP "=>"
 
 litP :: Parser Lit
-litP = matchP getLit
-  where
-    getLit (TLit l) = Just l
-    getLit _        = Nothing
+litP = matchP $ \case
+  TLit l -> Just l
+  _      -> Nothing
 
-litE :: Parser Expr
-litE = label "literal" $
-  ELit <$> litP
+numP :: Parser String
+numP = matchP $ \case
+  TLit (LNum s) -> Just s
+  _             -> Nothing
 
 identP :: Parser Ident
-identP = matchP getIden
+identP = matchP $ \case
+  TIden s -> Just (Ident s)
+  _       -> Nothing
+
+privP :: Parser String
+privP = matchP $ \case
+  TPriv s -> Just s
+  _       -> Nothing
+
+nameWhereP :: (String -> Bool) -> Parser String
+nameWhereP p = matchP $ \case
+  TIden s | p s -> Just s
+  TKey  s | p s -> Just s
+  _            -> Nothing
+
+nameP :: Parser String
+nameP = nameWhereP (const True)
+
+wordP :: String -> Parser ()
+wordP s = label s (() <$ nameWhereP (== s))
+
+-- `: T`, in params, fields, declarations
+annotP :: Parser (Maybe TExpr)
+annotP = optional (colP *> texprE)
+
+-- `= e`, in params and fields
+initP :: Parser (Maybe Expr)
+initP = optional (symP "=" *> exprE)
+
+-- `?`, in fields, type objects, function-type params
+optFlagP :: Parser Bool
+optFlagP = isJust <$> optional (symP "?")
+
+-- `(A, B)`, in `type` and `class`
+tparamsP :: Parser [Ident]
+tparamsP = option [] (parenP (sepBy identP commaP))
+
+-- `forall T U.`
+forallP :: Parser [Ident]
+forallP = option [] (keyP "forall" *> some identP <* symP ".")
+
+-- `forall T U. fn`, in lambdas and methods
+fnHeadP :: Parser [Ident]
+fnHeadP = forallP <* keyP "fn"
+
+-- layout block which can be implicit `< ... >` or explicit `{ ... }`
+blockOf :: Parser a -> Parser (BlockTyp, [a])
+blockOf p = choice
+  [ (,) Impl <$> between (bracketP '<') (bracketP '>') items
+  , (,) Expl <$> between (bracketP '{') (bracketP '}') items
+  ]
   where
-    getIden (TIden s) = Just (Ident s)
-    getIden _         = Nothing
+    items = sepEndBy p semicolonP
+
+-- anything after `.` / `?.`
+memNameP :: Parser MemName
+memNameP = label "member name" $ (MNPub <$> nameP) <|> (MNPriv <$> privP)
+
+nonShortHandKeyP :: Parser PropKey
+nonShortHandKeyP = choice
+  [ PKStr  <$> stringP
+  , PKNum  <$> numP
+  , PKComp <$> squareP exprE
+  ]
+
+-- object literal and type object keys
+propKeyP :: Parser PropKey
+propKeyP = label "property key" $ (PKMem . MNPub <$> nameP) <|> nonShortHandKeyP
+
+litE :: Parser Expr
+litE = label "literal" $ ELit <$> litP
 
 identE :: Parser Expr
 identE = label "identifier" $ EIden <$> identP
 
+elemE :: Parser Elem
+elemE = label "element" $ choice [ ElemSpread <$> (dotsP *> exprE), ElemPlain <$> exprE ]
+
+argsP :: Parser [Elem]
+argsP = parenP (sepEndBy elemE commaP)
+
 arrE :: Parser Expr
-arrE = label "array" $ 
-  EArr <$> squareP (sepBy (spread <|> plain) commaP)
-  where
-    spread = AESpread <$> (symP "..." *> exprE)
-    plain  = AEPlain <$> exprE
+arrE = label "array" $ EArr <$> squareP (sepEndBy elemE commaP)
 
 objE :: Parser Expr
-objE = label "object" $
-  EObj <$> curlyP (sepBy (keyVal <|> short <|> spread <|> computed) commaP)
+objE = label "object" $ EObj <$> curlyP (sepEndBy fieldP commaP)
   where
-  key = ObjKey <$> (nameP <|> stringP)
-  col  = symP ":"
-  dots = symP "..."
-  keyVal   = OFKeyVal   <$> (try $ key <* col) <*> exprE
-  short    = OFShort    <$> (identP <* notFollowedBy col)
-  spread   = OFSpread   <$> (dots *> exprE)
-  computed = OFComputed <$> ((squareP exprE) <* col) <*> exprE
+    fieldP  = choice [ spreadP, keyValP, shortP ]
+    spreadP = OFSpread <$> (dotsP *> exprE)
+    -- `OFKeyVal` needs try because it can be `OFShort` or `OFShortInit`
+    keyValP = OFKeyVal
+      <$> (try (PKMem . MNPub <$> nameP <* colP) <|> (nonShortHandKeyP <* colP))
+      <*> exprE
+    shortP = do
+      i <- identP
+      (OFShortInit i <$> (symP "=" *> exprE)) <|> return (OFShort i)
+
+-- everything after `fn` (and after the method key, for methods)
+sigTailP :: [Ident] -> Parser FuncSig
+sigTailP vars = FuncSig vars <$> parenP (endByRest plainP restP) <*> annotP
+  where
+    plainP = LPPlain <$> identP <*> annotP <*> initP
+    restP  = LPRest  <$> (dotsP *> identP) <*> annotP
+
+funcsigP :: Parser FuncSig
+funcsigP = fnHeadP >>= sigTailP
 
 lamE :: Parser Expr
-lamE = label "lambda" $ do
-  keyP "fn"
-  args <- parenP $ sepBy argP commaP
-  symP "=>"
-  body <- exprE
-  return $ ELam args body
-  where
-    argP = (,) <$> identP <*> (optional $ symP ":" *> texprE)
+lamE = label "lambda" $ ELam <$> funcsigP <* fatP <*> exprE
 
 ifthenE :: Parser Expr
 ifthenE = label "if then" $ do
@@ -184,40 +343,37 @@ ifthenE = label "if then" $ do
 memE :: Parser (Expr -> Expr)
 memE = label "member" $ do
   symP "."
-  m <- (MemName <$> nameP)
+  m <- memNameP
   return $ \x -> EMem x m
 
 appE :: Parser (Expr -> Expr)
-appE = label "application" $ flip EApp <$> (parenP $ sepBy exprE commaP)
+appE = label "application" $ flip EApp <$> argsP
 
 indexE :: Parser (Expr -> Expr)
-indexE = label "index" $ flip EIndex <$> (squareP exprE)
+indexE = label "index" $ flip EIndex <$> squareP exprE
 
 optPostE :: Parser (Expr -> Expr)
 optPostE = label "optional" $ do
   symP "?."
-  choice [
-      flip EOptMem   <$> (MemName <$> nameP)
-    , flip EOptApp   <$> (parenP $ sepBy exprE commaP)
-    , flip EOptIndex <$> (squareP exprE)
+  choice
+    [ flip EOptMem   <$> memNameP
+    , flip EOptApp   <$> argsP
+    , flip EOptIndex <$> squareP exprE
     ]
 
 nonNullE :: Parser (Expr -> Expr)
-nonNullE = label "non null" $ do
-  symP "!"
-  return $ \x -> ENonNull x
+nonNullE = label "non null" $ ENonNull <$ symP "!"
 
 postfixE :: Parser Expr
 postfixE = do
   prim  <- choice [ identE, litE, arrE, objE, newE, parenP exprE ]
-  postL <- many $ choice ([ optPostE, memE, appE, indexE, nonNullE ])
+  postL <- many $ choice [ optPostE, memE, appE, indexE, nonNullE ]
   return $ foldl (&) prim postL
 
+newE :: Parser Expr
 newE = label "new" $
-  keyP "new" *> (ENew <$> newPostFixE <*> (parenP $ sepBy exprE commaP))
+  keyP "new" *> (ENew <$> newPostFixE <*> argsP)
 
--- `newPrim` produced same as `prim` in `postfixE` (minus `newE`)
--- `newPostL` avoids `appE` because `new Widget(x, y)` means `ENew Widget [x, y]` and not `ENew (EApp Widget [x, y]) []`
 newPostFixE :: Parser Expr
 newPostFixE = do
   newPrim  <- choice [ identE, litE, parenP exprE, arrE, objE ]
@@ -232,7 +388,8 @@ opE = makeExprParser postfixE table
     binop op = EBinOp op <$ symP (binop2str op)
     kbin  op = EBinOp op <$ keyP (binop2str op)
 
-    prefixop = Prefix $ foldr1 (.) <$> (some . choice $ [ unop Neg, unop Pos, unop Not ] <> [ kunop TypeOf, kunop Void, kunop Await ])
+    prefixop = Prefix $ foldr1 (.) <$> (some . choice $
+      [ unop Neg, unop Pos, unop Not, kunop TypeOf, kunop Void, kunop Await ])
 
     table =
       [ [ prefixop ]
@@ -251,31 +408,99 @@ opE = makeExprParser postfixE table
       , [ InfixR (binop Coalesce) ]
       ]
 
+-- ---------------------------------------------------------------------------
+-- Classes
+
+-- every modifier that can begin a class member
+memModTable :: [(MemMod, String)]
+memModTable =
+  [ (MMStatic,    "static")
+  , (MMProtected, "protected")
+  , (MMReadonly,  "readonly")
+  , (MMAbstract,  "abstract")
+  , (MMOverride,  "override")
+  ]
+
+-- words that can begin a class member, and so can't be a bare member name.
+-- use a string key instead, eg, `"static" = 1`
+reservedMemNames :: [String]
+reservedMemNames = fmap snd memModTable <> [ "fn", "forall" ]
+
+memModP :: Parser MemMod
+memModP = label "modifier" $ choice [ m <$ wordP s | (m, s) <- memModTable ]
+
+memWordP :: Parser String
+memWordP = nameWhereP (`notElem` reservedMemNames)
+
+classKeyP :: Parser PropKey
+classKeyP = label "member key" $ choice
+  [ PKMem . MNPriv <$> privP
+  , PKMem . MNPub  <$> memWordP
+  , nonShortHandKeyP
+  ]
+
+-- class member: modifiers, then a method (`forall`/`fn`) or a field (a key)
+classMemP :: Parser ClassMem
+classMemP = do
+  mods <- many memModP
+  methodP mods <|> fieldP mods
+  where
+    -- fails without consuming unless it sees `forall` or `fn`, so no `try` needed
+    methodP mods = do
+      vars <- fnHeadP
+      CMethod mods <$> classKeyP <*> sigTailP vars <*> optional (fatP *> exprE)
+    fieldP mods = CMField mods <$> classKeyP <*> optFlagP <*> annotP <*> initP
+
+classBodyP :: Parser [ClassMem]
+classBodyP = keyP "where" *> (snd <$> blockOf classMemP)
+
+classE :: Parser Expr
+classE = label "class" $ do
+  isAbs          <- (True <$ try (wordP "abstract" *> keyP "class")) <|> (False <$ keyP "class")
+  (name, params) <- option (Nothing, []) ((,) . Just <$> identP <*> tparamsP)
+  ext            <- optional (keyP "extends" *> trefE)
+  impls          <- option [] (keyP "implements" *> sepBy1 trefE commaP)
+  EClass . ClassDecl isAbs name params ext impls <$> classBodyP
+
+-- ---------------------------------------------------------------------------
+-- Blocks and declarations
+
 blockE :: Parser Expr
 blockE = do
-  k <- choice . fmap keyP $ [ "where", "do" ]
-  b <- bracketP '<' <|> bracketP '{'
-  xs <- sepEndBy exprE semicolonP
-  if b == '<' then bracketP '>' else bracketP '}'
-  return (EBlock (if b == '<' then Impl else Expl) (BlockKey k) xs)
+  k         <- keyP "where" <|> keyP "do"
+  (typ, xs) <- blockOf exprE
+  return (EBlock typ (BlockKey k) xs)
 
 declE :: Parser Expr
 declE = do
   key <- keyP "let" <|> keyP "const"
-  pat <- exprE -- remember to filter later (every expr is not a valid pattern)
+  pat <- opE -- exprE would consume the whole declaration (due to assignE)
+  ann <- annotP
   symP "="
-  exp <- exprE
-  return (EDecl (if key == "let" then LetDecl else ConstDecl) pat exp)
+  EDecl (if key == "let" then LetDecl else ConstDecl) pat ann <$> exprE
 
 typeDeclE :: Parser Expr
-typeDeclE = label "type declaration" $ do
-  keyP "type"
-  name <- identP
-  params <- option [] (parenP $ sepBy identP commaP)
-  symP "="
-  ETypeDecl name params <$> texprE
+typeDeclE = label "type declaration" $
+  keyP "type" *> (ETypeDecl <$> identP <*> tparamsP <* symP "=" <*> texprE)
 
-exprE = choice [ lamE, ifthenE, blockE, declE, opE ]
+-- parses `opE` and then tries to parse `assignE`
+-- if `assignE` fails then the stream is just an operation
+opOrAsE :: Parser Expr
+opOrAsE = do
+  onlyOp <- opE
+  assignE onlyOp <|> return onlyOp
+  where
+    assignE lhs = label "assignment" $ do
+      op  <- choice . fmap opP $ [minBound .. maxBound]
+      rhs <- exprE
+      return (EAssign op lhs rhs)
+    opP o = o <$ symP (assignop2str o)
+
+exprE :: Parser Expr
+exprE = choice [ lamE, ifthenE, blockE, declE, typeDeclE, classE, opOrAsE ]
+
+-- ---------------------------------------------------------------------------
+-- Types
 
 data TUnOp
   = TReadOnly
@@ -294,11 +519,12 @@ data TTupElem
   deriving (Eq, Ord, Show)
 
 data TObjField
-  = TOFKeyVal Ident Bool TExpr
+  = TOFKeyVal PropKey Bool TExpr   -- Bool: optional `k?: T`
   deriving (Eq, Ord, Show)
 
 data TFuncParam
-  = TFPIdTyp Ident Bool TExpr
+  = TFPIdent Ident Bool TExpr
+  | TFPRest  Ident TExpr
   deriving (Eq, Ord, Show)
 
 newtype Raw = Raw String
@@ -329,7 +555,7 @@ tarrE = label "type array" $ TEArr <$ (bracketP '[' *> bracketP ']')
 trefE :: Parser TExpr
 trefE = label "type name" $ do
   name <- sepBy1 identP (symP ".")
-  args <- option [] (parenP $ sepBy texprE commaP)
+  args <- parenP (sepBy texprE commaP) <|> return []
   return $ TEApp name args
 
 ttupE :: Parser TExpr
@@ -338,26 +564,18 @@ ttupE = label "type tuple" $
 
 tobjE :: Parser TExpr
 tobjE = label "type object" $
-  TEObj <$> curlyP (sepBy field commaP)
-  where
-    field = TOFKeyVal <$> (Ident <$> nameP) <*> (isJust <$> optional (symP "?")) <* symP ":" <*> texprE
+  TEObj <$> curlyP (sepBy (TOFKeyVal <$> propKeyP <*> optFlagP <* colP <*> texprE) commaP)
 
-tforallE :: Parser TExpr
-tforallE = label "forall" $ do
-  keyP "forall"
-  vs <- some identP
-  symP "."
-  tfuncE vs
-
+-- `fn(...) => R`, after an optional `forall` has been parsed
 tfuncE :: [Ident] -> Parser TExpr
-tfuncE vs = label "function type" $ do
+tfuncE vars = label "function type" $ do
   keyP "fn"
-  ps  <- parenP $ sepBy param commaP
-  symP "=>"
-  ret <- texprE
-  return (TEFunc vs ps ret)
+  ps <- parenP (endByRest paramP restP)
+  fatP
+  TEFunc vars ps <$> texprE
   where
-    param = TFPIdTyp <$> identP <*> ((isJust <$> optional (symP "?"))) <* symP ":" <*> texprE
+    paramP = TFPIdent <$> identP <*> optFlagP <* colP <*> texprE
+    restP  = TFPRest  <$> (dotsP *> identP) <* colP <*> texprE
 
 trawE :: Parser TExpr
 trawE = label "raw type" $ (TERaw . Raw) <$> (keyP "raw" *> stringP)
@@ -379,5 +597,6 @@ topE = makeExprParser tpostE table
       [ [ binop TInter "&" ]
       , [ binop TUnion "|" ]
       ]
+
 texprE :: Parser TExpr
-texprE = choice [ tforallE, tfuncE [], topE ]
+texprE = choice [ forallP >>= tfuncE, topE ]

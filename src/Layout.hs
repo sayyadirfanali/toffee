@@ -2,15 +2,17 @@ module Layout where
 
 import Text.Megaparsec.Pos
 import Lexer
-import Debug.Trace (trace)
 
 data LayoutError
-  = UnmatchedClose   SourcePos       -- '}' with no matching explicit '{' (never opened)
-  | UnmatchedOpen    SourcePos       -- explicit '{' with no matching explicit '{' (never closed)
-  | IndentationError SourcePos Int   -- dedent to a column matching no implicit context
-  | HangingBlock     SourcePos       -- `do` or `where` with nothing after
+  = UnmatchedClose   SourcePos
+  | UnmatchedOpen    SourcePos
+  | MismatchedClose  SourcePos
+  | IndentationError SourcePos Int
+  | CloseInBlock     SourcePos
+  | HangingBlock     SourcePos
   | UnexpectedEOF
   deriving (Eq, Show)
+
 
 getLne :: TokInfo -> Int
 getLne tok = if tok.tokVal == TEOF then 0 else unPos . sourceLine . tokStart $ tok
@@ -35,47 +37,58 @@ preLay []          = []
 pattern V :: Tok -> TokInfo
 pattern V t <- TokInfo { tokVal = t }
 
-lay :: [TokInfo] -> [Int] -> Either LayoutError [TokInfo]
-lay (t@(V (TLayAngle n)) : ts) (m : ms)
-  | n == m -- continued layout equal than current layout -> insert semicolon and do NOT touch stack
-    = (withInfo t TSemiColon :) <$> lay ts (m : ms)
-  | n < m -- continued layout shallower than current layout -> insert close brace, pop stack, and continuation marker in token stream
-    = (withInfo t (TBracket '>') :) <$> lay (withInfo t (TLayAngle n) : ts) ms
-lay (t@(V (TLayAngle _)) : ts) ms
-    -- continued layout deeper than current layout -> no need to insert anything (considered to be part of same line)
-    = lay ts ms
+pattern ExplCurly :: Int
+pattern ExplCurly = 0
 
+pattern ExplParen :: Int
+pattern ExplParen = - 1
+
+pattern ExplSquare :: Int
+pattern ExplSquare = - 2
+
+-- NB: copied as directly as possible from Haskell Report Section 10.3
+lay :: [TokInfo] -> [Int] -> Either LayoutError [TokInfo]
+-- inside implicit context
+lay (t@(V (TLayAngle n)) : ts) (m : ms)
+  | n == m                                        = (withInfo t TSemiColon :) <$> lay ts (m : ms)
+  | n < m                                         = (withInfo t (TBracket '>') :) <$> lay (withInfo t (TLayAngle n) : ts) ms
+lay (t@(V (TLayAngle _)) : ts) ms = lay ts ms
+
+-- opened implicit context
 lay (t@(V (TLayBrace n)) : ts) (m : ms)
-  | n > m -- opened layout deeper than current layout -> insert open brace and push `n` in stack
-    = (withInfo t (TBracket '<') :) <$> lay ts (n : m : ms)
+  | n > m                                         = (withInfo t (TBracket '<') :) <$> lay ts (n : m : ms)
 lay (t@(V (TLayBrace n)) : ts) []
-  | n > 0 -- opened layout without any layout -> insert open brace and push `n` in stack
-    = (withInfo t (TBracket '<') :) <$> lay ts [n]
-lay (t@(V (TLayBrace n)) : ts) ms
-  -- opened layout but shallower than current layout (no start at all) -> insert empty open and closed curlies
-  = do
+  | n > 0                                         = (withInfo t (TBracket '<') :) <$> lay ts [n]
+lay (t@(V (TLayBrace n)) : ts) ms                 = do
     res <- lay (withInfo t (TLayAngle n) : ts) ms
     return $ withInfo t (TBracket '<') : withInfo t (TBracket '>') : res
 
-lay (t@(V (TBracket '}')) : ts) (0 : ms)
-  -- closed explicit layout inside explicit layout -> insert close brace and pop explicit `0` from stack
-  = (t :) <$> lay ts ms
-lay (t@(V (TBracket '}')) : _) _
-  -- closed explicit layout inside non-explicit layout -> fail
-  = Left (UnmatchedClose (tokStart t))
-lay (t@(V (TBracket '{')) : ts) ms
-  -- open explicit layout always even when no blocks (eg, objects)
-  = (t :) <$> lay ts (0 : ms)
+-- opened explicit context
+lay (t@(V (TBracket '{')) : ts) ms                = (t :) <$> lay ts (ExplCurly : ms)
+lay (t@(V (TBracket '(')) : ts) ms                = (t :) <$> lay ts (ExplParen : ms)
+lay (t@(V (TBracket '[')) : ts) ms                = (t :) <$> lay ts (ExplSquare : ms)
 
-lay (t@(V TEOF) : _) ms = closeAll t ms
-lay (t : ts) ms         = (t :) <$> lay ts ms
-lay [] []               = Right []
-lay [] ms               = Left UnexpectedEOF
+-- closed explicit context
+lay (t@(V (TBracket '}')) : ts) (ExplCurly : ms)  = (t :) <$> lay ts ms
+lay (t@(V (TBracket ')')) : ts) (ExplParen : ms)  = (t :) <$> lay ts ms
+lay (t@(V (TBracket ']')) : ts) (ExplSquare : ms) = (t :) <$> lay ts ms
+lay (t@(V (TBracket c)) : _) (m : _)
+  | elem c "})]" && m <= 0                        = Left (MismatchedClose (tokStart t))
+lay (t@(V (TBracket c)) : _) _
+  | elem c "})]"                                  = Left (UnmatchedClose (tokStart t))
+
+-- reached eof
+lay (t@(V TEOF) : _) ms                           = closeAll t ms
+
+-- layout change not relevant
+lay (t : ts) ms                                   = (t :) <$> lay ts ms
+lay [] []                                         = Right []
+lay [] ms                                         = Left UnexpectedEOF
 
 closeAll :: TokInfo -> [Int] -> Either LayoutError [TokInfo]
-closeAll eofTok []       = Right [eofTok]
-closeAll eofTok (0 : _)  = Left (UnmatchedOpen (tokStart eofTok))
-closeAll eofTok (m : ms) = (withInfo eofTok (TBracket '>') :) <$> closeAll eofTok ms
+closeAll eofTok []                = Right [eofTok]
+closeAll eofTok (m : _) | m <= 0  = Left (UnmatchedOpen (tokStart eofTok))
+closeAll eofTok (m : ms)          = (withInfo eofTok (TBracket '>') :) <$> closeAll eofTok ms
 
 layout :: [TokInfo] -> Either LayoutError [TokInfo]
 layout []         = Right []

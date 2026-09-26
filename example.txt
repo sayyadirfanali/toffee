@@ -1,2 +1,1 @@
-do { x > 1; return (y - 2) }
-fn () => B
+class A where { static = 1 }

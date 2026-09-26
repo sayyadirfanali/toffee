@@ -54,4 +54,14 @@ curlyP = between (bracketP '{') (bracketP '}')
 squareP :: Parser a -> Parser a
 squareP = between (bracketP '[') (bracketP ']')
 
+endByRest :: Parser a -> Parser a -> Parser [a]
+endByRest p r = go
+  where
+    go = choice
+      [
+        return <$> r
+      , (:) <$> p <*> ((commaP *> go) <|> return [])
+      , return []
+      ]
+
 runParse p = runParserT p ""

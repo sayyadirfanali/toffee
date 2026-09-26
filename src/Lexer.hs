@@ -30,11 +30,11 @@ skipSpace = L.space (void $ oneOf [' ', '\t', '\n']) (L.skipLineComment "//") em
 lexeme :: Lexer a -> Lexer a
 lexeme p = p <* skipSpace
 
-iden :: Lexer Char
-iden = letterChar <|> digitChar <|> char '_'
+ident :: Lexer Char
+ident = letterChar <|> digitChar <|> char '_'
 
 symbol :: String -> Lexer String
-symbol s = lexeme (string s <* notFollowedBy iden)
+symbol s = lexeme (string s <* notFollowedBy ident)
 
 data TokInfo = TokInfo
   { tokStart :: SourcePos,
@@ -56,6 +56,7 @@ data Tok
   | TSym String
   | TBracket Char
   | TKey String
+  | TPriv String
   | TSemiColon
   | TEOF
   | TLayBrace Int
@@ -136,25 +137,37 @@ strL = label "string" $ do
 litL :: Lexer Tok
 litL = choice [nullL, boolL, numL, strL]
 
-idenL :: Lexer Tok
-idenL = label "identifier" $ do
-  x <- satisfy (\c -> isAlpha c || c == '_')
-  xs <- many iden
-  return $ TIden (x : xs)
+rawName :: Lexer String
+rawName = (:) <$> satisfy (\c -> isAlpha c || c == '_') <*> many ident
 
-ops = DL.sortOn (Down . length) . words $
-  "... ?. ?? ** == /= <= => >= && || -> :: += -= *= %= **= ??= ||= &&= << >> >>> = - + * / % < > ! : , . ? & | ^"
+idenL :: Lexer Tok
+idenL = label "identifier" $ TIden <$> rawName
+
+privL :: Lexer Tok
+privL = label "private name" $ TPriv <$> (char '#' *> rawName)
+
+ops :: [String]
+ops = DL.sortOn (Down . length) . concatMap words $
+  [ "... ?. ?? ! ? : , ."
+  , "+ - * / % **"
+  , "== != < > <= >="
+  , "& | ^ << >> >>>"
+  , "&& ||"
+  , "= += -= *= /= %= **= <<= >>= >>>= &= |= ^= &&= ||= ??="
+  , "=> -> ::"
+  ]
 
 symL :: Lexer Tok
 symL = label "symbol" $ do
   s <- choice (fmap string ops)
   return $ TSym s
 
-keys = words "instanceof satisfies forall await const typeof where else then void type new let as do fn if"
+keys = DL.sortOn (Down . length) . words $
+  "instanceof satisfies forall implements protected extends static await class const typeof where else then void type let new raw as do fn if"
 
 keyL :: Lexer Tok
 keyL = label "keyword" $ do
-  k <- try $ choice (fmap symbol keys)
+  k <- choice (fmap (try . symbol) keys)
   return $ TKey k
 
 braL :: Lexer Tok
@@ -176,7 +189,7 @@ mkTokInfo p = do
 lexer :: Lexer [TokInfo]
 lexer = do
   skipSpace
-  tokInfo <- many . (mkTokInfo . lexeme) . choice $ [ keyL, symL, braL, semiL, litL, idenL ]
+  tokInfo <- many . (mkTokInfo . lexeme) . choice $ [ keyL, symL, braL, semiL, litL, privL, idenL ]
   pos     <- getSourcePos
   eof
   return $ tokInfo ++ [TokInfo { tokStart = pos, tokStr = [], tokVal = TEOF }]
