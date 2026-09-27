@@ -18,6 +18,12 @@ import Utils
 import Data.Maybe (fromMaybe, maybeToList)
 import Data.Ord (Down(..))
 
+identHead :: Char -> Bool
+identHead c = isAlpha c || elem c "_$"
+
+identBody :: Char -> Bool
+identBody c = identHead c || isDigit c
+
 type Lexer = Parsec Void String
 
 instance ShowErrorComponent String where
@@ -30,17 +36,10 @@ skipSpace = L.space (void $ oneOf [' ', '\t', '\n']) (L.skipLineComment "//") em
 lexeme :: Lexer a -> Lexer a
 lexeme p = p <* skipSpace
 
-ident :: Lexer Char
-ident = letterChar <|> digitChar <|> char '_'
-
 symbol :: String -> Lexer String
-symbol s = lexeme (string s <* notFollowedBy ident)
+symbol s = lexeme (string s <* notFollowedBy (satisfy identBody))
 
-data TokInfo = TokInfo
-  { tokStart :: SourcePos,
-    tokStr   :: String,
-    tokVal   :: Tok
-  }
+data TokInfo = TokInfo { tokStart :: SourcePos, tokStr :: String, tokVal :: Tok }
   deriving (Eq, Ord, Show)
 
 instance VisualStream [TokInfo] where
@@ -62,18 +61,6 @@ data Tok
   | TLayBrace Int
   | TLayAngle Int
   deriving (Eq, Ord, Show)
-
-sm = TSemiColon
-oa = TBracket '<'
-ca = TBracket '>'
-ob = TBracket '{'
-cb = TBracket '}'
-op = TBracket '('
-cp = TBracket ')'
-oq = TBracket '['
-cq = TBracket ']'
-dk = TKey "do"
-wk = TKey "where"
 
 data Lit
   = LNull String
@@ -118,7 +105,7 @@ numL = label "number" $ do
   d <- some digitChar
   f <- optional frac
   e <- optional exp
-  return $ TLit (LNum $ d ++ fromMaybe [] f ++ fromMaybe [] e)
+  return $ TLit (LNum $ d <> fromMaybe [] f <> fromMaybe [] e)
   where
     frac = (:) <$> char '.' <*> some digitChar
     exp = do
@@ -135,26 +122,37 @@ strL = label "string" $ do
   return $ TLit (LStr s)
 
 litL :: Lexer Tok
-litL = choice [nullL, boolL, numL, strL]
+litL = label "literal" $ choice [nullL, boolL, numL, strL]
 
-rawName :: Lexer String
-rawName = (:) <$> satisfy (\c -> isAlpha c || c == '_') <*> many ident
+identAuxL :: Lexer String
+identAuxL = do
+    x <- satisfy identHead
+    xs <- many (satisfy identBody)
+    return (x : xs)
+    where
 
 idenL :: Lexer Tok
-idenL = label "identifier" $ TIden <$> rawName
+idenL = label "identifier" $
+  TIden <$> identAuxL
 
 privL :: Lexer Tok
-privL = label "private name" $ TPriv <$> (char '#' *> rawName)
+privL = label "private identifier" $
+  TPriv <$> (char '#' *> identAuxL)
 
 ops :: [String]
 ops = DL.sortOn (Down . length) . concatMap words $
-  [ "... ?. ?? ! ? : , ."
-  , "+ - * / % **"
-  , "== != < > <= >="
-  , "& | ^ << >> >>>"
-  , "&& ||"
-  , "= += -= *= /= %= **= <<= >>= >>>= &= |= ^= &&= ||= ??="
-  , "=> -> ::"
+  [ "... ?. ."
+    , "! **"
+    , "* / %"
+    , "+ -"
+    , "<< >> >>>"
+    , "< <= > >= == !="
+    , "& ^ |"
+    , "&& || ??"
+    , "? : =>"
+    , "= += -= *= /= %= **= <<= >>= >>>= &= |= ^= &&= ||= ??="
+    , ", :"
+    , "-> => ::" 
   ]
 
 symL :: Lexer Tok
@@ -163,7 +161,15 @@ symL = label "symbol" $ do
   return $ TSym s
 
 keys = DL.sortOn (Down . length) . words $
-  "instanceof satisfies forall implements protected extends static await class const typeof where else then void type let new raw as do fn if"
+  "instanceof implements \
+  \ interface protected satisfies \
+  \ continue \
+  \ default extends finally \
+  \ delete forall import export static return typeof \
+  \ await break catch class const throw where while \
+  \ else then void type \
+  \ and for let new raw try \
+  \ as do fn if in"
 
 keyL :: Lexer Tok
 keyL = label "keyword" $ do
@@ -190,8 +196,21 @@ lexer :: Lexer [TokInfo]
 lexer = do
   skipSpace
   tokInfo <- many . (mkTokInfo . lexeme) . choice $ [ keyL, symL, braL, semiL, litL, privL, idenL ]
-  pos     <- getSourcePos
+  pos <- getSourcePos
   eof
   return $ tokInfo ++ [TokInfo { tokStart = pos, tokStr = [], tokVal = TEOF }]
 
 runLex = runParser (lexer) ""
+
+-- auxiliaries needed in both lexer and layout tests
+sm = TSemiColon
+oa = TBracket '<'
+ca = TBracket '>'
+ob = TBracket '{'
+cb = TBracket '}'
+op = TBracket '('
+cp = TBracket ')'
+oq = TBracket '['
+cq = TBracket ']'
+dk = TKey "do"
+wk = TKey "where"

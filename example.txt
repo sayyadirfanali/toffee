@@ -1,1 +1,0 @@
-class A where { static = 1 }

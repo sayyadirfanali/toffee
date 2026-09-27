@@ -26,8 +26,8 @@ typTest inp exp = TestCase $ do
     Left err -> assertFailure ("failed on " <> show inp <> ": " <> err)
     Right out -> out @?= exp
 
-typFail :: String -> Test
-typFail inp = TestCase $ do
+failTest :: String -> Test
+failTest inp = TestCase $ do
   res <- typParse inp
   case res of
     Left _    -> return ()
@@ -45,6 +45,7 @@ prm  x = TFPIdent (Ident x) False
 oprm x = TFPIdent (Ident x) True
 rst  x = TFPRest (Ident x)
 fun = TEFunc []
+
 a = ref "A"
 b = ref "B"
 c = ref "C"
@@ -85,11 +86,11 @@ atoms =
   , typTest "false" (TELit (LBool "false"))
   , typTest "null" (TELit (LNull "null"))
 
-  , typFail ""
-  , typFail "ns."
-  , typFail "ns.1"
-  , typFail "-1" -- not supported yet
-  , typFail "T[K]" -- not supported yet
+  , failTest ""
+  , failTest "ns."
+  , failTest "ns.1"
+  , failTest "-1" -- not supported yet
+  , failTest "T[K]" -- not supported yet
   ]
 
 application :: [Test]
@@ -106,11 +107,11 @@ application =
   , typTest "Box({ a: A })" (app "Box" [TEObj [fld "a" a]])
   , typTest "Box(fn() => A)" (app "Box" [fun [] a])
   , typTest "Map(string, A[])" (app "Map" [ref "string", TEArr a])
+  , typTest "Box(A,)" (app "Box" [a])
 
-  , typFail "Box("
-  , typFail "Box(A,)"
-  , typFail "Box A"
-  , typFail "Foo<T>"
+  , failTest "Box("
+  , failTest "Box A"
+  , failTest "Foo<T>"
   ]
 
 operators :: [Test]
@@ -131,10 +132,10 @@ operators =
   , typTest "true | false" (un (TELit (LBool "true")) (TELit (LBool "false")))
   , typTest "A | null" (un a (TELit (LNull "null")))
 
-  , typFail "A |"
-  , typFail "A &"
-  , typFail "| A" -- not supported yet
-  , typFail "A | | B"
+  , failTest "A |"
+  , failTest "A &"
+  , failTest "| A" -- not supported yet
+  , failTest "A | | B"
   ]
 
 arrays :: [Test]
@@ -151,14 +152,15 @@ arrays =
   , typTest "(A & B)[]" (TEArr (bi a b))
   , typTest "(A | B)[][]" (TEArr (TEArr (un a b)))
 
-  , typFail "[]T"
-  , typFail "T["
+  , failTest "[]T"
+  , failTest "T["
   ]
 
 tuples :: [Test]
 tuples =
   [ typTest "[]" (tup [])
   , typTest "[A]" (tup [a])
+  , typTest "[A,]" (tup [a])
   , typTest "[A, B]" (tup [a, b])
   , typTest "[A, B, C]" (tup [a, b, c])
   , typTest "[[A], B]" (tup [tup [a], b])
@@ -169,9 +171,8 @@ tuples =
   , typTest "[string, number] & { length: 2 }"
       (bi (tup [ref "string", ref "number"]) (TEObj [fld "length" (TELit (LNum "2"))]))
 
-  , typFail "[A, B"
-  , typFail "[A,]"
-  , typFail "[,]"
+  , failTest "[A, B"
+  , failTest "[,]"
   ]
 
 objects :: [Test]
@@ -186,17 +187,15 @@ objects =
   , typTest "{ a: [A, B] }" (TEObj [fld "a" (tup [a, b])])
   , typTest "{ a: { b: B } }" (TEObj [fld "a" (TEObj [fld "b" b])])
   , typTest "{ a: { b: { c: C } } }" (TEObj [fld "a" (TEObj [fld "b" (TEObj [fld "c" c])])])
-
   , typTest "{ f: fn() => A, b: B }" (TEObj [fld "f" (fun [] a), fld "b" b])
-
   , typTest "{ type: \"click\" }" (TEObj [fld "type" (TELit (LStr "click"))])
   , typTest "{ if: A, new: B }" (TEObj [fld "if" a, fld "new" b])
+  , typTest "{ a: A, }" (TEObj [fld "a" a])
 
-  , typFail "{ a }"
-  , typFail "{ a: }"
-  , typFail "{ a?: }"
-  , typFail "{ a: A, }"
-  , typFail "{ a: A"
+  , failTest "{ a }"
+  , failTest "{ a: }"
+  , failTest "{ a?: }"
+  , failTest "{ a: A"
   ]
 
 objectKeys :: [Test]
@@ -206,15 +205,13 @@ objectKeys =
   , typTest "{ 'x': A }" (TEObj [TOFKeyVal (PKStr "x") False a])
   , typTest "{ 0: A, 1: B }" (TEObj [TOFKeyVal (PKNum "0") False a, TOFKeyVal (PKNum "1") False b])
   , typTest "{ [k]: A }" (TEObj [TOFKeyVal (PKComp (EIden (Ident "k"))) False a])
-  , typTest "{ [Symbol.iterator]: A }"
-      (TEObj [TOFKeyVal (PKComp (EMem (EIden (Ident "Symbol")) (MNPub "iterator"))) False a])
-  , typTest "{ a: A, \"b\": B, 2: C }"
-      (TEObj [fld "a" a, TOFKeyVal (PKStr "b") False b, TOFKeyVal (PKNum "2") False c])
+  , typTest "{ [Symbol.iterator]: A }" (TEObj [TOFKeyVal (PKComp (EMem (EIden (Ident "Symbol")) (MNPub "iterator"))) False a])
+  , typTest "{ a: A, \"b\": B, 2: C }" (TEObj [fld "a" a, TOFKeyVal (PKStr "b") False b, TOFKeyVal (PKNum "2") False c])
 
-  , typFail "{ #a: A }"
-  , typFail "{ \"a\" }"
-  , typFail "{ [k] }"
-  , typFail "{ [k]: }"
+  , failTest "{ #a: A }"
+  , failTest "{ \"a\" }"
+  , failTest "{ [k] }"
+  , failTest "{ [k]: }"
   ]
 
 functions :: [Test]
@@ -241,15 +238,15 @@ functions =
   , typTest "(fn() => A)[]" (TEArr (fun [] a))
   , typTest "fn(x: A,) => B" (fun [prm "x" a] b)
 
-  , typFail "A | fn() => B"
-  , typFail "A & fn() => B"
-  , typFail "fn(x) => A"
-  , typFail "fn(x: A)"
-  , typFail "fn(x: A) =>"
-  , typFail "fn x: A => B"
-  , typFail "fn(x: A) -> B"
-  , typFail "fn(1: A) => B"
-  , typFail "fn(x: A,,) => B"
+  , failTest "A | fn() => B"
+  , failTest "A & fn() => B"
+  , failTest "fn(x) => A"
+  , failTest "fn(x: A)"
+  , failTest "fn(x: A) =>"
+  , failTest "fn x: A => B"
+  , failTest "fn(x: A) -> B"
+  , failTest "fn(1: A) => B"
+  , failTest "fn(x: A,,) => B"
   ]
 
 restParams :: [Test]
@@ -260,13 +257,13 @@ restParams =
   , typTest "fn(...args: [A, B]) => C" (fun [rst "args" (tup [a, b])] c)
   , typTest "forall T. fn(...xs: T[]) => T" (TEFunc [Ident "T"] [rst "xs" (TEArr t)] t)
   , typTest "fn(f: fn(...xs: A[]) => B) => C" (fun [prm "f" (fun [rst "xs" (TEArr a)] b)] c)
+  , typTest "fn(...xs: A[],) => B" (fun [rst "xs" (TEArr a)] b)
 
-  , typFail "fn(...xs) => A"          -- rest params in types need an annotation
-  , typFail "fn(...xs: A[], y: B) => C"
-  , typFail "fn(...xs: A[],) => B"
-  , typFail "fn(x: A ...ys: B[]) => C"
-  , typFail "fn(...: A[]) => B"
-  , typFail "fn(...xs?: A[]) => B"
+  , failTest "fn(...xs) => A"
+  , failTest "fn(...xs: A[], y: B) => C"
+  , failTest "fn(x: A ...ys: B[]) => C"
+  , failTest "fn(...: A[]) => B"
+  , failTest "fn(...xs?: A[]) => B"
   ]
 
 foralls :: [Test]
@@ -289,13 +286,13 @@ foralls =
   , typTest "(forall T. fn(x: T) => T)[]" (TEArr (TEFunc [Ident "T"] [prm "x" t] t))
   , typTest "(forall T. fn() => T) | A" (un (TEFunc [Ident "T"] [] t) a)
 
-  , typFail "forall. fn() => A"
-  , typFail "forall T fn(x: T) => T"
-  , typFail "forall T. A"
-  , typFail "forall T."
-  , typFail "forall 1. fn() => A"
-  , typFail "forall T. forall U. fn() => U"
-  , typFail "A | forall T. fn() => T"
+  , failTest "forall. fn() => A"
+  , failTest "forall T fn(x: T) => T"
+  , failTest "forall T. A"
+  , failTest "forall T."
+  , failTest "forall 1. fn() => A"
+  , failTest "forall T. forall U. fn() => U"
+  , failTest "A | forall T. fn() => T"
   ]
 
 voids :: [Test]
@@ -320,9 +317,9 @@ raws =
   , typTest "Promise(raw \"keyof T\")" (app "Promise" [TERaw (Raw "keyof T")])
   , typTest "fn() => raw \"X\"" (fun [] (TERaw (Raw "X")))
 
-  , typFail "raw"
-  , typFail "raw Partial"
-  , typFail "raw 1"
+  , failTest "raw"
+  , failTest "raw Partial"
+  , failTest "raw 1"
   ]
 
 grouping :: [Test]
@@ -331,10 +328,10 @@ grouping =
   , typTest "((A))" a
   , typTest "(A | B)" (un a b)
 
-  , typFail "()"
-  , typFail "(A"
-  , typFail "A)"
-  , typFail "(A, B)"
+  , failTest "()"
+  , failTest "(A"
+  , failTest "A)"
+  , failTest "(A, B)"
   ]
 
 layoutTests :: [Test]
@@ -350,9 +347,9 @@ layoutTests =
   , typTest "forall K V.\n  fn(m: Map(K, V)) => K[]"
       (TEFunc [Ident "K", Ident "V"] [prm "m" (app "Map" [ref "K", ref "V"])] (TEArr (ref "K")))
 
-  , typFail "A\n| B"
-  , typFail "A |\nB"
-  , typFail "fn(x: A)\n=> B"
+  , failTest "A\n| B"
+  , failTest "A |\nB"
+  , failTest "fn(x: A)\n=> B"
   ]
 
 realistic :: [Test]

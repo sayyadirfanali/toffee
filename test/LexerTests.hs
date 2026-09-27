@@ -31,6 +31,7 @@ tests :: Test
 tests = TestList $ concat
   [ literals
   , identifiers
+  , notKeywords
   , keywords
   , symbols
   , maximalMunch
@@ -106,18 +107,20 @@ identifiers =
   , lexTest "x1" [TIden "x1"]
   , lexTest "x1y2" [TIden "x1y2"]
   , lexTest "_" [TIden "_"]
+  , lexTest "$" [TIden "$"]
   , lexTest "__" [TIden "__"]
+  , lexTest "$$" [TIden "$$"]
   , lexTest "X" [TIden "X"]
   , lexTest "FooBar" [TIden "FooBar"]
   , lexTest "camelCase" [TIden "camelCase"]
   , lexTest "café" [TIden "café"]
   , lexTest "a b" [TIden "a", TIden "b"]
   ]
-  <>
 
-  -- not keywords yet
+notKeywords :: [Test]
+notKeywords =
   [ lexTest w [TIden w]
-  | w <- words "in of async return function this undefined super yield switch case break continue for while import export from default interface"
+  | w <- words "of this case from async super yield switch function undefined"
   ]
 
 keywords :: [Test]
@@ -183,9 +186,7 @@ brackets =
   , lexTest "([{}])" [op, oq, ob, cb, cq, cp]
   , lexTest "(a)" [op, TIden "a", cp]
   , lexTest "T[]" [TIden "T", oq, cq]
-
   , lexTest "<>" [TSym "<", TSym ">"]
-
   , lexTest ";" [sm]
   , lexTest ";;" [sm, sm]
   , lexTest "a;b" [TIden "a", sm, TIden "b"]
@@ -203,7 +204,6 @@ whitespace =
   , lexTest "x  " [TIden "x"]
   , lexTest "a\nb" [TIden "a", TIden "b"]
   , lexTest "a\n\n  b" [TIden "a", TIden "b"]
-
   , lexTest "// just a comment" []
   , lexTest "x // hi" [TIden "x"]
   , lexTest "x//hi" [TIden "x"]
@@ -280,7 +280,6 @@ fails =
   , lexFail "#"
   , lexFail "@"
   , lexFail "~"
-  , lexFail "$"
   , lexFail "\\"
   ]
 
