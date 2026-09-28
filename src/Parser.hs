@@ -4,10 +4,9 @@ import Data.Void
 import Text.Megaparsec
 import qualified Data.Set as Set
 
-import Utils
 import Lexer
 
-type Parser = ParsecT Void [TokInfo] IO
+type Parser = Parsec Void [TokInfo]
 
 satisfyP :: (Tok -> Bool) -> Parser TokInfo
 satisfyP p = satisfy (p . tokVal)
@@ -54,4 +53,5 @@ squareP = between (bracketP '[') (bracketP ']')
 eofP :: Parser Tok
 eofP = singleP TEOF
 
-runParse p = runParserT p ""
+runParse :: Parsec e s a -> s -> Either (ParseErrorBundle s e) a
+runParse p = runParser p ""

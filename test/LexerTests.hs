@@ -1,315 +1,266 @@
 module LexerTests (tests) where
 
-import Test.HUnit
+import Prelude hiding (exp)
 
+import Test.HUnit
 import Lexer
 import Text.Megaparsec.Pos (SourcePos(..), unPos)
 
-dropEOF :: [Tok] -> [Tok]
-dropEOF ts = case last ts of
-  TEOF -> init ts
-  _    -> ts
+lexWith :: String -> ([TokInfo] -> Assertion) -> Test
+lexWith inp k = TestCase $ case runLex inp of
+  Left err  -> assertFailure ("lex failed on " <> show inp <> ": " <> show err)
+  Right out -> k out
 
-lexTest :: String -> [Tok] -> Test
-lexTest inp exp = TestCase $ do
-  res <- return $ runLex inp
-  case res of
-    Left err  -> assertFailure ("lex failed on " <> show inp <> ": " <> show err)
-    Right out -> dropEOF (fmap tokVal out) @?= exp
+ok :: String -> [Tok] -> Test
+ok inp exp = lexWith inp $ \out -> filter (/= TEOF) (fmap tokVal out) @?= exp
 
 lexFail :: String -> Test
-lexFail inp = TestCase $ do
-  r <- return $ runLex inp
-  case r of
-    Left _    -> return ()
-    Right out -> assertFailure ("expected lex failure on " <> show inp <> ", got " <> show (fmap tokVal out))
+lexFail inp = TestCase $ case runLex inp of
+  Left _    -> return ()
+  Right out -> assertFailure ("expected lex failure on " <> show inp <> ", got " <> show (fmap tokVal out))
 
 lineCol :: TokInfo -> (Int, Int)
 lineCol t = (unPos (sourceLine (tokStart t)), unPos (sourceColumn (tokStart t)))
 
+idens :: String -> [Tok]
+idens = fmap TIden . words
+
+num :: String -> Tok
+num = TLit . LNum
+
+str :: String -> Tok
+str = TLit . LStr
+
 tests :: Test
-tests = TestList $ concat
-  [ literals
-  , identifiers
-  , notKeywords
-  , keywords
-  , symbols
-  , maximalMunch
-  , brackets
-  , whitespace
-  , composite
-  , fails
-  , positions
-  ]
+tests = TestList $
+  concat
+    [ concat [ literals, numbers, strings, identifiers, keywords, symbols , brackets, privates, regexes, whitespace, composite ]
+    , generated
+    , fmap lexFail fails
+    , positions
+    ]
+
+generated :: [Test]
+generated =
+     [ ok k [TKey k] | k <- keys ]
+  <> [ ok (k <> s) [TIden (k <> s)] | k <- keys, s <- ["x", "1", "_"] ]
+  <> [ ok (k <> "(") [TKey k, op] | k <- keys ]
+  <> [ ok s [TSym s] | s <- ops ]
+  <> [ ok ("a" <> s <> "b") [TIden "a", TSym s, TIden "b"] | s <- ops ]
+  <> [ ok ("a " <> s <> " b") [TIden "a", TSym s, TIden "b"] | s <- ops ]
 
 literals :: [Test]
 literals =
-  [ lexTest "null" [TLit (LNull "null")]
-  , lexTest "true" [TLit (LBool "true")]
-  , lexTest "false" [TLit (LBool "false")]
+  [ ok "null" [TLit (LNull "null")]
+  , ok "true" [TLit (LBool "true")]
+  , ok "false" [TLit (LBool "false")]
+  , ok "nullable trueish falsey null1 true_ Null" (idens "nullable trueish falsey null1 true_ Null")
+  ]
 
-  , lexTest "nullable" [TIden "nullable"]
-  , lexTest "trueish" [TIden "trueish"]
-  , lexTest "falsey" [TIden "falsey"]
-  , lexTest "null1" [TIden "null1"]
-  , lexTest "true_" [TIden "true_"]
-  , lexTest "Null" [TIden "Null"]
+numbers :: [Test]
+numbers =
+  fmap (\s -> ok s [num s])
+    (words "0 7 123456 7.2 0.5 0.0 7e2 7E2 7e+2 7e-2 7.2e10 1.5E-3 0x1F 0xff 0XFF 0o17 0O17 0b101 0B101 123n 0x1Fn 0b101n 1_000 1_000_000 0xFF_FF 1_000.5")
+  <>
+  [ ok "1 .2" [num "1", TSym ".", num "2"]
+  , ok ".5" [TSym ".", num "5"]
+  , ok "-1" [TSym "-", num "1"]
+  , ok "1-1" [num "1", TSym "-", num "1"]
+  , ok "1n + 2n" [num "1n", TSym "+", num "2n"]
+  ]
 
-  , lexTest "0" [TLit (LNum "0")]
-  , lexTest "7" [TLit (LNum "7")]
-  , lexTest "123456" [TLit (LNum "123456")]
-  , lexTest "007" [TLit (LNum "007")]
-  , lexTest "7.2" [TLit (LNum "7.2")]
-  , lexTest "0.5" [TLit (LNum "0.5")]
-  , lexTest "0.0" [TLit (LNum "0.0")]
-  , lexTest "7e2" [TLit (LNum "7e2")]
-  , lexTest "7E2" [TLit (LNum "7E2")]
-  , lexTest "7e+2" [TLit (LNum "7e+2")]
-  , lexTest "7e-2" [TLit (LNum "7e-2")]
-  , lexTest "7.2e10" [TLit (LNum "7.2e10")]
-  , lexTest "1.5E-3" [TLit (LNum "1.5E-3")]
-  , lexTest "1 .2" [TLit (LNum "1"), TSym ".", TLit (LNum "2")]
-  , lexTest ".5" [TSym ".", TLit (LNum "5")]
-  , lexTest "-1" [TSym "-", TLit (LNum "1")]
-  , lexTest "1-1" [TLit (LNum "1"), TSym "-", TLit (LNum "1")]
-
-  , lexTest "\"abc\"" [TLit (LStr "abc")]
-  , lexTest "'abc'" [TLit (LStr "abc")]
-  , lexTest "`abc`" [TLit (LStr "abc")]
-  , lexTest "\"\"" [TLit (LStr "")]
-  , lexTest "''" [TLit (LStr "")]
-  , lexTest "``" [TLit (LStr "")]
-  , lexTest "\"a b  c\"" [TLit (LStr "a b  c")]
-
-  , lexTest "\"a\\\"b\"" [TLit (LStr "a\"b")]
-  , lexTest "'a\\'b'" [TLit (LStr "a'b")]
-  , lexTest "\"a\\nb\"" [TLit (LStr "a\nb")]
-  , lexTest "\"a\\tb\"" [TLit (LStr "a\tb")]
-  , lexTest "\"a\\\\b\"" [TLit (LStr "a\\b")]
-
-  , lexTest "'a\"b'" [TLit (LStr "a\"b")]
-  , lexTest "\"a'b\"" [TLit (LStr "a'b")]
-  , lexTest "`a\"b'c`" [TLit (LStr "a\"b'c")]
-
-  , lexTest "\"a + b\"" [TLit (LStr "a + b")]
-  , lexTest "\"x // y\"" [TLit (LStr "x // y")]
-
-  , lexTest "\"a\" \"b\"" [TLit (LStr "a"), TLit (LStr "b")]
-  , lexTest "\"a\"\"b\"" [TLit (LStr "a"), TLit (LStr "b")]
+strings :: [Test]
+strings =
+  [ ok "\"abc\"" [str "abc"]
+  , ok "'abc'" [str "abc"]
+  , ok "`abc`" [str "abc"] -- changes when backticks become raw strings
+  , ok "\"\" '' ``" [str "", str "", str ""]
+  , ok "\"a b  c\"" [str "a b  c"]
+  , ok "\"a\\\"b\"" [str "a\"b"]
+  , ok "'a\\'b'" [str "a'b"]
+  , ok "\"a\\nb\\tc\\\\d\"" [str "a\nb\tc\\d"]
+  , ok "'a\"b' \"a'b\" `a\"b'c`" [str "a\"b", str "a'b", str "a\"b'c"]
+  , ok "\"a + b\" \"x // y\"" [str "a + b", str "x // y"]
+  , ok "\"a\" \"b\"" [str "a", str "b"]
+  , ok "\"a\"\"b\"" [str "a", str "b"]
+  , ok "\"a\\qb\"" [str "aqb"] -- unknown escape keeps the char
+  , ok "\"\\x41\"" [str "A"]
+  , ok "\"\\x4142\"" [str "A42"] -- only two hex digits consumed
+  , ok "\"\\u0041\"" [str "A"]
+  , ok "\"\\u{1F600}\"" [str "\128512"]
+  , ok "\"\\0\"" [str "\0"]
+  , ok "\"\\b\\f\\v\\r\"" [str "\b\f\v\r"]
   ]
 
 identifiers :: [Test]
 identifiers =
-  [ lexTest "x" [TIden "x"]
-  , lexTest "_x" [TIden "_x"]
-  , lexTest "x_" [TIden "x_"]
-  , lexTest "x_y" [TIden "x_y"]
-  , lexTest "x1" [TIden "x1"]
-  , lexTest "x1y2" [TIden "x1y2"]
-  , lexTest "_" [TIden "_"]
-  , lexTest "$" [TIden "$"]
-  , lexTest "__" [TIden "__"]
-  , lexTest "$$" [TIden "$$"]
-  , lexTest "X" [TIden "X"]
-  , lexTest "FooBar" [TIden "FooBar"]
-  , lexTest "camelCase" [TIden "camelCase"]
-  , lexTest "café" [TIden "café"]
-  , lexTest "a b" [TIden "a", TIden "b"]
-  ]
-
-notKeywords :: [Test]
-notKeywords =
-  [ lexTest w [TIden w]
-  | w <- words "of this case from async super yield switch function undefined"
-  ]
+  fmap (\s -> ok s [TIden s]) (words "x _x x_ x_y x1 x1y2 _ $ __ $$ X FooBar camelCase café") <> [ ok "a b" (idens "a b") ]
 
 keywords :: [Test]
 keywords =
-  [ lexTest k [TKey k] | k <- keys ]
+  fmap (\w -> ok w [TIden w]) (keycon <> keysuff)
   <>
-  [ lexTest (k <> s) [TIden (k <> s)] | k <- keys, s <- ["x", "1", "_"] ]
-  <>
-  [ lexTest (k <> "(") [TKey k, op] | k <- keys ]
-  <>
-  [ lexTest w [TIden w]
-  | w <- words "types doo lets iffy constant fnord wherein newer assume async awaiting voidable elsewhere thenceforth rawx forallx typed"
+  [ ok "typeof x" [TKey "typeof", TIden "x"]
+  , ok "raw\"x\"" [TIden "raw", str "x"]
   ]
-  <>
-  [ lexTest "type" [TKey "type"]
-  , lexTest "typeof" [TKey "typeof"]
-  , lexTest "typeof x" [TKey "typeof", TIden "x"]
-  , lexTest "as" [TKey "as"]
-  , lexTest "raw\"x\"" [TKey "raw", TLit (LStr "x")]
-  ]
+  where
+    keycon = words "undefined protected arguments function default static switch yield async this from case and set get of meta type as forall interface satisfies raw implements readonly abstract override"
+    keysuff = words "types doo lets iffy constant fnord wherein newer assume awaiting voidable elsewhere thenceforth typeofx"
 
 symbols :: [Test]
 symbols =
-  [ lexTest s [TSym s] | s <- ops ]
-  <>
-  [ lexTest ("a" <> s <> "b") [TIden "a", TSym s, TIden "b"] | s <- ops ]
-  <>
-  [ lexTest ("a " <> s <> " b") [TIden "a", TSym s, TIden "b"] | s <- ops ]
-
-maximalMunch :: [Test]
-maximalMunch =
-  [ lexTest "...." [TSym "...", TSym "."]
-  , lexTest ".." [TSym ".", TSym "."]
-  , lexTest "?.." [TSym "?.", TSym "."]
-  , lexTest "?.5" [TSym "?.", TLit (LNum "5")]
-  , lexTest "???" [TSym "??", TSym "?"]
-  , lexTest "***" [TSym "**", TSym "*"]
-  , lexTest "**==" [TSym "**=", TSym "="]
-  , lexTest "===" [TSym "==", TSym "="]
-  , lexTest "!==" [TSym "!=", TSym "="]
-  , lexTest "==>" [TSym "==", TSym ">"]
-  , lexTest "=>=" [TSym "=>", TSym "="]
-  , lexTest "-->" [TSym "-", TSym "->"]
-  , lexTest "<<<" [TSym "<<", TSym "<"]
-  , lexTest ">>>>" [TSym ">>>", TSym ">"]
-  , lexTest ">>>>=" [TSym ">>>", TSym ">="]
-  , lexTest "&&&" [TSym "&&", TSym "&"]
-  , lexTest "&&==" [TSym "&&=", TSym "="]
-  , lexTest "|||" [TSym "||", TSym "|"]
-  , lexTest ":::" [TSym "::", TSym ":"]
-  , lexTest "!!x" [TSym "!", TSym "!", TIden "x"]
-  , lexTest "--x" [TSym "-", TSym "-", TIden "x"]
-  , lexTest "a-=-1" [TIden "a", TSym "-=", TSym "-", TLit (LNum "1")]
-  , lexTest "a<b>c" [TIden "a", TSym "<", TIden "b", TSym ">", TIden "c"]
-  , lexTest "x!=1" [TIden "x", TSym "!=", TLit (LNum "1")]
-  , lexTest "x! = 1" [TIden "x", TSym "!", TSym "=", TLit (LNum "1")]
-  , lexTest "a = = b" [TIden "a", TSym "=", TSym "=", TIden "b"]
+  [ ok "...." [TSym "...", TSym "."]
+  , ok ".." [TSym ".", TSym "."]
+  , ok "?.." [TSym "?.", TSym "."]
+  , ok "?.5" [TSym "?.", num "5"]
+  , ok "???" [TSym "??", TSym "?"]
+  , ok "a?b" [TIden "a", TSym "?", TIden "b"]
+  , ok "***" [TSym "**", TSym "*"]
+  , ok "**==" [TSym "**=", TSym "="]
+  , ok "===" [TSym "==", TSym "="]
+  , ok "!==" [TSym "!=", TSym "="]
+  , ok "==>" [TSym "==", TSym ">"]
+  , ok "=>=" [TSym "=>", TSym "="]
+  , ok " -->" [TSym "-", TSym "->"]
+  , ok "<<<" [TSym "<<", TSym "<"]
+  , ok ">>>>" [TSym ">>>", TSym ">"]
+  , ok ">>>>=" [TSym ">>>", TSym ">="]
+  , ok "&&&" [TSym "&&", TSym "&"]
+  , ok "&&==" [TSym "&&=", TSym "="]
+  , ok "|||" [TSym "||", TSym "|"]
+  , ok ":::" [TSym "::", TSym ":"]
+  , ok "!!x" [TSym "!", TSym "!", TIden "x"]
+  , ok " --x" [TSym "-", TSym "-", TIden "x"]
+  , ok "a-=-1" [TIden "a", TSym "-=", TSym "-", num "1"]
+  , ok "a<b>c" [TIden "a", TSym "<", TIden "b", TSym ">", TIden "c"]
+  , ok "a<-1" [TIden "a", TSym "<", TSym "-", num "1"] -- changes if `<-` is added
+  , ok "x!=1" [TIden "x", TSym "!=", num "1"]
+  , ok "x! = 1" [TIden "x", TSym "!", TSym "=", num "1"]
+  , ok "a = = b" [TIden "a", TSym "=", TSym "=", TIden "b"]
   ]
 
 brackets :: [Test]
 brackets =
-  [ lexTest "()[]{}" [op, cp, oq, cq, ob, cb]
-  , lexTest "([{}])" [op, oq, ob, cb, cq, cp]
-  , lexTest "(a)" [op, TIden "a", cp]
-  , lexTest "T[]" [TIden "T", oq, cq]
-  , lexTest "<>" [TSym "<", TSym ">"]
-  , lexTest ";" [sm]
-  , lexTest ";;" [sm, sm]
-  , lexTest "a;b" [TIden "a", sm, TIden "b"]
-  , lexTest "a ; b" [TIden "a", sm, TIden "b"]
+  [ ok "()[]{}" [op, cp, oq, cq, ob, cb]
+  , ok "([{}])" [op, oq, ob, cb, cq, cp]
+  , ok "(a)" [op, TIden "a", cp]
+  , ok "T[]" [TIden "T", oq, cq]
+  , ok "<>" [TSym "<", TSym ">"]
+  , ok ";" [sm]
+  , ok ";;" [sm, sm]
+  , ok "a;b" [TIden "a", sm, TIden "b"]
+  , ok "a ; b" [TIden "a", sm, TIden "b"]
+  ]
+
+privates :: [Test]
+privates =
+  [ ok "#x" [TPriv "x"]
+  , ok "#if #_a1 #$" [TPriv "if", TPriv "_a1", TPriv "$"]
+  , ok "a.#b" [TIden "a", TSym ".", TPriv "b"]
+  , ok "#x in o" [TPriv "x", TKey "in", TIden "o"]
+  ]
+
+regexes :: [Test]
+regexes =
+  [ ok "r\"[a-z]+\"" [TLit (LReg "[a-z]+" "")]
+  , ok "r\"\\d+\"" [TLit (LReg "\\d+" "")] -- backslash preserved
+  , ok "r\"\"" [TLit (LReg "" "")]
+  , ok "r\"a\\\"b\"" [TLit (LReg "a\"b" "")] -- \" drops the backslash
+  , ok "r\"\\d+\"g" [TLit (LReg "\\d+" "g")]
+  , ok "r\"[a-z]\"gi" [TLit (LReg "[a-z]" "gi")]
+  , ok "r\"x\"gimsuydv" [TLit (LReg "x" "gimsuydv")]
+  , ok "r\"x\"then" [TLit (LReg "x" ""), TKey "then"]
+  , ok "r\"x\"g_" [TLit (LReg "x" "g"), TIden "_"]
+  , ok "r" [TIden "r"]
+  , ok "r + 1" [TIden "r", TSym "+", num "1"]
+  , ok "r \"x\"" [TIden "r", str "x"]
+  , ok "r.test(s)" [TIden "r", TSym ".", TIden "test", op, TIden "s", cp]
+  , ok "R\"x\"" [TIden "R", str "x"]
   ]
 
 whitespace :: [Test]
 whitespace =
-  [ lexTest "" []
-  , lexTest "   " []
-  , lexTest "\n\n" []
-  , lexTest "\t" []
-  , lexTest "  x" [TIden "x"]
-  , lexTest "\tx" [TIden "x"]
-  , lexTest "x  " [TIden "x"]
-  , lexTest "a\nb" [TIden "a", TIden "b"]
-  , lexTest "a\n\n  b" [TIden "a", TIden "b"]
-  , lexTest "// just a comment" []
-  , lexTest "x // hi" [TIden "x"]
-  , lexTest "x//hi" [TIden "x"]
-  , lexTest "x // hi\nx" [TIden "x", TIden "x"]
-  , lexTest "// c\nx" [TIden "x"]
-  , lexTest "x // c1\n// c2\ny" [TIden "x", TIden "y"]
-  , lexTest "// a + b \"not a string" []
-  , lexTest "a / b" [TIden "a", TSym "/", TIden "b"]
+  [ ok "" []
+  , ok "   " []
+  , ok "\n\n" []
+  , ok "\t" []
+  , ok "  x" [TIden "x"]
+  , ok "\tx" [TIden "x"]
+  , ok "x  " [TIden "x"]
+  , ok "a\nb" (idens "a b")
+  , ok "a\n\n  b" (idens "a b")
+  , ok "// just a comment" []
+  , ok "x // hi" [TIden "x"]
+  , ok "x//hi" [TIden "x"]
+  , ok "x // hi\nx" (idens "x x")
+  , ok "// c\nx" [TIden "x"]
+  , ok "x // c1\n// c2\ny" (idens "x y")
+  , ok "// a + b \"not a string" []
+  , ok "a / b" [TIden "a", TSym "/", TIden "b"]
   ]
 
 composite :: [Test]
 composite =
-  [ lexTest "let f = fn(x) => x + 1"
-      [TKey "let", TIden "f", TSym "=", TKey "fn", op, TIden "x", cp, TSym "=>", TIden "x", TSym "+", TLit (LNum "1")]
+  [ ok "let f = fn(x) => x + 1" [TKey "let", TIden "f", TSym "=", TKey "fn", op, TIden "x", cp, TSym "=>", TIden "x", TSym "+", num "1"]
 
-  , lexTest "f(g(x), [1, 2], { a: 1 })"
-      [TIden "f", op,
-        TIden "g", op, TIden "x", cp, TSym ",",
-        oq, TLit (LNum "1"), TSym ",", TLit (LNum "2"), cq, TSym ",",
-        ob, TIden "a", TSym ":", TLit (LNum "1"), cb,
-      cp]
+  , ok  "f(g(x), [1, 2], { a: 1 })"
+      [TIden "f", op, TIden "g", op, TIden "x", cp, TSym ",", oq, num "1", TSym ",", num "2", cq, TSym "," , ob, TIden "a", TSym ":", num "1", cb, cp]
 
-  , lexTest "a.b(c).d[0]" [TIden "a", TSym ".", TIden "b", op, TIden "c", cp, TSym ".", TIden "d", oq, TLit (LNum "0"), cq]
+  , ok "a.b(c).d[0]" [TIden "a", TSym ".", TIden "b", op, TIden "c", cp, TSym ".", TIden "d", oq, num "0", cq] 
 
-  , lexTest "a?.b?.(c)?.[0]"
-      [TIden "a", TSym "?.", TIden "b", TSym "?.", op, TIden "c", cp, TSym "?.", oq, TLit (LNum "0"), cq]
+  , ok "a?.b?.(c)?.[0]" [TIden "a", TSym "?.", TIden "b", TSym "?.", op, TIden "c", cp, TSym "?.", oq, num "0", cq] 
 
-  , lexTest "x ??= y ?? z" [TIden "x", TSym "??=", TIden "y", TSym "??", TIden "z"]
+  , ok "x ??= y ?? z" [TIden "x", TSym "??=", TIden "y", TSym "??", TIden "z"]
 
-  , lexTest "new Foo(...args)" [TKey "new", TIden "Foo", op, TSym "...", TIden "args", cp]
+  , ok "new Foo(...args)" [TKey "new", TIden "Foo", op, TSym "...", TIden "args", cp]
 
-  , lexTest "if a then b else c" [TKey "if", TIden "a", TKey "then", TIden "b", TKey "else", TIden "c"]
+  , ok "if a then b else c" [TKey "if", TIden "a", TKey "then", TIden "b", TKey "else", TIden "c"]
 
-  , lexTest "do { let x = 1; x }" [TKey "do", ob, TKey "let", TIden "x", TSym "=", TLit (LNum "1"), sm, TIden "x", cb]
+  , ok "do { let x = 1; x }" [TKey "do", ob, TKey "let", TIden "x", TSym "=", num "1", sm, TIden "x", cb]
 
-  , lexTest "a instanceof B" [TIden "a", TKey "instanceof", TIden "B"]
+  , ok "a instanceof B" [TIden "a", TKey "instanceof", TIden "B"]
+  
+  , ok "await f()" [TKey "await", TIden "f", op, cp]
 
-  , lexTest "await f()" [TKey "await", TIden "f", op, cp]
+  , ok "void 0" [TKey "void", num "0"]
 
-  , lexTest "void 0" [TKey "void", TLit (LNum "0")]
+  , ok "this.x" [TIden "this", TSym ".", TIden "x"]
 
-  , lexTest "x as T" [TIden "x", TKey "as", TIden "T"]
+  , ok "super()" [TIden "super", op, cp]
 
-  , lexTest "x satisfies T" [TIden "x", TKey "satisfies", TIden "T"]
+  , ok "x == undefined" [TIden "x", TSym "==", TIden "undefined"]
 
-  , lexTest "type Pair(A, B) = [A, B]"
-      [TKey "type", TIden "Pair", op, TIden "A", TSym ",", TIden "B", cp, TSym "=", oq, TIden "A", TSym ",", TIden "B", cq]
+  , ok "s.match(r\"\\d+\"g)" [TIden "s", TSym ".", TIden "match", op, TLit (LReg "\\d+" "g"), cp]
 
-  , lexTest "forall T. fn(x: T) => T"
-      [TKey "forall", TIden "T", TSym ".", TKey "fn", op, TIden "x", TSym ":", TIden "T", cp, TSym "=>", TIden "T"]
+  , ok  "f :: Int -> String -> Bool" [TIden "f", TSym "::", TIden "Int", TSym "->", TIden "String", TSym "->", TIden "Bool"] 
 
-  , lexTest "{ a: A, b?: B }"
-      [ob, TIden "a", TSym ":", TIden "A", TSym ",", TIden "b", TSym "?", TSym ":", TIden "B", cb]
+  , ok "\"a\" + \"b\" == `c`" [str "a", TSym "+", str "b", TSym "==", str "c"]
 
-  , lexTest "raw \"Partial<User>\"" [TKey "raw", TLit (LStr "Partial<User>")]
-
-  , lexTest "f :: Int -> String -> Bool"
-      [TIden "f", TSym "::", TIden "Int", TSym "->", TIden "String", TSym "->", TIden "Bool"]
-
-  , lexTest "\"a\" + \"b\" == `c`"
-      [TLit (LStr "a"), TSym "+", TLit (LStr "b"), TSym "==", TLit (LStr "c")]
-
-  , lexTest "// leading comment\nlet x = 1 // trailing\nlet y = 2"
-      [TKey "let", TIden "x", TSym "=", TLit (LNum "1"),
-       TKey "let", TIden "y", TSym "=", TLit (LNum "2")]
+  , ok  "// leading comment\nlet x = 1 // trailing\nlet y = 2" [TKey "let", TIden "x", TSym "=", num "1", TKey "let", TIden "y", TSym "=", num "2"] 
   ]
 
-fails :: [Test]
+fails :: [String]
 fails =
-  [ lexFail "\"unterminated"
-  , lexFail "'unterminated"
-  , lexFail "`unterminated"
-  , lexFail "\"a\\qb\""
-  , lexFail "#"
-  , lexFail "@"
-  , lexFail "~"
-  , lexFail "\\"
+  [ "\"unterminated"
+  , "'unterminated"
+  , "`unterminated"
+  , "#"
+  , "@"
+  , "~"
+  , "\\"
+  , "\"\\x4\"" -- incomplete \x escape
+  , "\"\\u041\"" -- incomplete \u escape
+  , "r\"abc" -- unterminated regex
   ]
 
 positions :: [Test]
 positions =
-  [ TestCase $ do
-      let Right ts = runLex "x\ny"
-      fmap (unPos . sourceLine . tokStart) ts @?= [1, 2, 2]
-
-  , TestCase $ do
-      let Right ts = runLex "  x"
-      fmap (unPos . sourceColumn . tokStart) (take 1 ts) @?= [3]
-
-  , TestCase $ do
-      let Right ts = runLex "a\n  b"
-      fmap lineCol ts @?= [(1, 1), (2, 3), (2, 4)]
-
-  , TestCase $ do
-      let Right ts = runLex "x\n"
-      fmap lineCol ts @?= [(1, 1), (2, 1)]
-
-  , TestCase $ do
-      let Right ts = runLex "  // c\n  x"
-      fmap lineCol (take 1 ts) @?= [(2, 3)]
-
-  , TestCase $ do
-      let Right ts = runLex "\tx"
-      fmap lineCol (take 1 ts) @?= [(1, 9)]
-
-  , TestCase $ do
-      let Right ts = runLex ">>>= typeof"
-      fmap tokStr (take 2 ts) @?= [">>>=", "typeof"]
+  [ lexWith "x\ny"        $ \r -> fmap (fst . lineCol) r @?= [1, 2, 2]
+  , lexWith "  x"         $ \r -> fmap (snd . lineCol) (take 1 r) @?= [3]
+  , lexWith "a\n  b"      $ \r -> fmap lineCol r @?= [(1, 1), (2, 3), (2, 4)]
+  , lexWith "x\n"         $ \r -> fmap lineCol r @?= [(1, 1), (2, 1)]
+  , lexWith "  // c\n  x" $ \r -> fmap lineCol (take 1 r) @?= [(2, 3)]
+  , lexWith "\tx"         $ \r -> fmap lineCol (take 1 r) @?= [(1, 9)]
+  , lexWith ">>>= typeof" $ \r -> fmap tokStr (take 2 r) @?= [">>>=", "typeof"]
+  , lexWith "r\"\\d+\"gi" $ \r -> fmap tokStr (take 1 r) @?= ["r\"\\d+\"gi"]
   ]

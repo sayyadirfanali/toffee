@@ -29,8 +29,7 @@ main = do
           section "layout"
           mapM_ (print . L.tokVal) layVal
           section "parser"
-          result <- P.runParse topP layVal
-          case result of
+          case P.runParse topP layVal of
             Left bundle -> mapM_ (report layVal) (bundleErrors bundle)
             Right exprs -> mapM_ print exprs
 

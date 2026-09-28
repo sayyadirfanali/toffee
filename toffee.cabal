@@ -1,24 +1,25 @@
 cabal-version: 2.2
 name: toffee
 version: 0.1.0.0
-synopsis:
-description:
-bug-reports:
-license:
+synopsis: A Haskell-flavored parser front-end for a TypeScript-like language
+description: toffee lexes, applies Haskell-report-style layout, and parses a TypeScript-like expression/type grammar written with Haskell-style syntax (fn, forall, where/do blocks).
+license: GPL-3.0-only
 license-file: LICENSE
 author: sayyadirfanali
 maintainer: irfan@irfanali.org
-copyright:
-category:
+category: Language
 build-type: Simple
 extra-source-files: CHANGELOG.md
 
 common constraints
   default-extensions:
+    FlexibleInstances
+    InstanceSigs
     LambdaCase
-    PatternSynonyms
     OverloadedRecordDot
+    PatternSynonyms
     ViewPatterns
+  ghc-options: -Wall -Wno-unused-do-bind
 
 library
   import: constraints
@@ -55,10 +56,10 @@ test-suite test
   type: exitcode-stdio-1.0
   main-is: Test.hs
   other-modules:
+    Render
     LayoutTests
     LexerTests
     ExprTests
-    TypeTests
   build-depends:
     HUnit,
     base,

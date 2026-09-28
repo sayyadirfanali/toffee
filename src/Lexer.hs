@@ -1,7 +1,3 @@
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE InstanceSigs #-}
-
 module Lexer where
 
 import Control.Monad
@@ -13,9 +9,7 @@ import Data.Void
 import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
-import Text.Megaparsec.Debug
-import Utils
-import Data.Maybe (fromMaybe, maybeToList)
+import Data.Maybe (maybeToList)
 import Data.Ord (Down(..))
 
 identHead :: Char -> Bool
@@ -26,12 +20,8 @@ identBody c = identHead c || isDigit c
 
 type Lexer = Parsec Void String
 
-instance ShowErrorComponent String where
-  showErrorComponent :: String -> String
-  showErrorComponent = show
-
 skipSpace :: Lexer ()
-skipSpace = L.space (void $ oneOf [' ', '\t', '\n']) (L.skipLineComment "//") empty
+skipSpace = L.space (void $ oneOf [' ', '\t', '\r', '\n']) (L.skipLineComment "//") empty
 
 lexeme :: Lexer a -> Lexer a
 lexeme p = p <* skipSpace
@@ -67,28 +57,29 @@ data Lit
   | LBool String
   | LNum String
   | LStr String
-  | LReg String
+  | LReg String String
   deriving (Eq, Ord, Show)
 
 litDat :: Lit -> String
-litDat (LNum s)  = s
-litDat (LStr s)  = show s
+litDat (LNum s) = s
+litDat (LStr s) = show s
 litDat (LBool s) = s
 litDat (LNull s) = s
-litDat (LReg s)  = s
+litDat (LReg s t) = "r\"" <> s <> "\"" <> t
 
 tokDat :: Tok -> String
 tokDat (TLit (LNull s)) = s
 tokDat (TLit (LBool s)) = s
-tokDat (TLit (LNum s))  = s
-tokDat (TLit (LStr s))  = s
-tokDat (TLit (LReg s))  = s
-tokDat (TIden s)        = s
-tokDat (TSym s)         = s
-tokDat (TBracket c)     = [c]
-tokDat (TKey s)         = s
-tokDat TSemiColon       = ";"
-tokDat _                = []
+tokDat (TLit (LNum s)) = s
+tokDat (TLit (LStr s)) = s
+tokDat (TLit (LReg s t)) = "r\"" <> s <> "\"" <> t
+tokDat (TIden s) = s
+tokDat (TPriv s) = s
+tokDat (TSym s) = s
+tokDat (TBracket c) = [c]
+tokDat (TKey s) = s
+tokDat TSemiColon = ";"
+tokDat _ = []
 
 nullL :: Lexer Tok
 nullL = label "null" $ do
@@ -102,34 +93,63 @@ boolL = label "bool" $ do
 
 numL :: Lexer Tok
 numL = label "number" $ do
-  d <- some digitChar
-  f <- optional frac
-  e <- optional exp
-  return $ TLit (LNum $ d <> fromMaybe [] f <> fromMaybe [] e)
+  n <- try prefixL <|> decimalL
+  return $ TLit (LNum n)
   where
-    frac = (:) <$> char '.' <*> some digitChar
-    exp = do
+    prefixL = do
+      z <- char '0'
+      b <- oneOf "xXoObB"
+      ds <- some (hexDigitChar <|> char '_')
+      n <- optional (char 'n')
+      return $ z : b : ds ++ maybe [] pure n
+    decimalL = do
+      d <- digitL
+      f <- optional ((:) <$> char '.' <*> digitL)
+      e <- optional expL
+      n <- optional (char 'n')
+      return $ d <> maybe [] id f <> maybe [] id e <> maybe [] pure n
+    digitL  = (:) <$> digitChar <*> many (digitChar <|> char '_')
+    expL = do
       x <- oneOf "eE"
-      y <- optional $ oneOf "+-" 
-      z <- some digitChar
+      y <- optional (oneOf "+-")
+      z <- digitL
       return $ x : maybeToList y ++ z
+
+escChar :: Lexer Char
+escChar = char '\\' *> (esc <|> anySingle)
+  where
+    esc = choice
+      [ '\n' <$ char 'n'
+      , '\t' <$ char 't'
+      , '\r' <$ char 'r'
+      , '\b' <$ char 'b'
+      , '\f' <$ char 'f'
+      , '\v' <$ char 'v'
+      , '\0' <$ try (char '0' <* notFollowedBy digitChar)
+      , char 'x' *> hexN 2
+      , char 'u' *> uEsc
+      ]
+    uEsc = (char '{' *> hexVar <* char '}') <|> hexN 4
+    hexN n = toEnum <$> (read . ("0x" ++) <$> count n hexDigitChar)
+    hexVar = toEnum <$> (read . ("0x" ++) <$> some hexDigitChar)
+
+strChar :: Char -> Lexer Char
+strChar q = escChar <|> satisfy (\c -> c /= q && c /= '\\')
 
 strL :: Lexer Tok
 strL = label "string" $ do
-  let quote = char '"' <|> char '\'' <|> char '`'
-  c <- quote
-  s <- manyTill L.charLiteral (char c)
+  q <- char '"' <|> char '\'' <|> char '`'
+  s <- manyTill (strChar q) (char q)
   return $ TLit (LStr s)
 
 litL :: Lexer Tok
-litL = label "literal" $ choice [nullL, boolL, numL, strL]
+litL = label "literal" $ choice [nullL, boolL, numL, regL, strL]
 
 identAuxL :: Lexer String
 identAuxL = do
     x <- satisfy identHead
     xs <- many (satisfy identBody)
     return (x : xs)
-    where
 
 idenL :: Lexer Tok
 idenL = label "identifier" $
@@ -139,20 +159,30 @@ privL :: Lexer Tok
 privL = label "private identifier" $
   TPriv <$> (char '#' *> identAuxL)
 
+regL :: Lexer Tok
+regL = label "regex" $ do
+  _ <- try (char 'r' <* lookAhead (char '"'))
+  _ <- char '"'
+  body  <- concat <$> manyTill regChar (char '"')
+  flags <- many (oneOf "gimsuydv")
+  return $ TLit (LReg body flags)
+  where
+    regChar = try (['"'] <$ string "\\\"") <|> ((:[]) <$> satisfy (/= '"'))
+
 ops :: [String]
 ops = DL.sortOn (Down . length) . concatMap words $
   [ "... ?. ."
-    , "! **"
-    , "* / %"
-    , "+ -"
-    , "<< >> >>>"
-    , "< <= > >= == !="
-    , "& ^ |"
-    , "&& || ??"
-    , "? : =>"
-    , "= += -= *= /= %= **= <<= >>= >>>= &= |= ^= &&= ||= ??="
-    , ", :"
-    , "-> => ::" 
+  , "! **"
+  , "* / %"
+  , "+ -"
+  , "<< >> >>>"
+  , "< <= > >= == !="
+  , "& ^ |"
+  , "&& || ??"
+  , "=>"
+  , "= += -= *= /= %= **= <<= >>= >>>= &= |= ^= &&= ||= ??="
+  , ", :"
+  , "? -> ::" -- reserved for future use
   ]
 
 symL :: Lexer Tok
@@ -160,16 +190,16 @@ symL = label "symbol" $ do
   s <- choice (fmap string ops)
   return $ TSym s
 
+keys :: [String]
 keys = DL.sortOn (Down . length) . words $
-  "instanceof implements \
-  \ interface protected satisfies \
+  "instanceof \
   \ continue \
-  \ default extends finally \
-  \ delete forall import export static return typeof \
+  \ extends finally \
+  \ delete import export return typeof \
   \ await break catch class const throw where while \
-  \ else then void type \
-  \ and for let new raw try \
-  \ as do fn if in"
+  \ else then void \
+  \ for let new try \
+  \ do fn if in"
 
 keyL :: Lexer Tok
 keyL = label "keyword" $ do
@@ -200,17 +230,39 @@ lexer = do
   eof
   return $ tokInfo ++ [TokInfo { tokStart = pos, tokStr = [], tokVal = TEOF }]
 
+runLex :: String -> Either (ParseErrorBundle String Void) [TokInfo]
 runLex = runParser (lexer) ""
 
 -- auxiliaries needed in both lexer and layout tests
+sm :: Tok
 sm = TSemiColon
+
+oa :: Tok
 oa = TBracket '<'
+
+ca :: Tok
 ca = TBracket '>'
+
+ob :: Tok
 ob = TBracket '{'
+
+cb :: Tok
 cb = TBracket '}'
+
+op :: Tok
 op = TBracket '('
+
+cp :: Tok
 cp = TBracket ')'
+
+oq :: Tok
 oq = TBracket '['
+
+cq :: Tok
 cq = TBracket ']'
+
+dk :: Tok
 dk = TKey "do"
+
+wk :: Tok
 wk = TKey "where"
