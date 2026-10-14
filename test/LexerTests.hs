@@ -73,7 +73,7 @@ strings :: [Test]
 strings =
   [ ok "\"abc\"" [str "abc"]
   , ok "'abc'" [str "abc"]
-  , ok "`abc`" [str "abc"] -- changes when backticks become raw strings
+  , ok "`abc`" [str "abc"] 
   , ok "\"\" '' ``" [str "", str "", str ""]
   , ok "\"a b  c\"" [str "a b  c"]
   , ok "\"a\\\"b\"" [str "a\"b"]
@@ -83,9 +83,9 @@ strings =
   , ok "\"a + b\" \"x // y\"" [str "a + b", str "x // y"]
   , ok "\"a\" \"b\"" [str "a", str "b"]
   , ok "\"a\"\"b\"" [str "a", str "b"]
-  , ok "\"a\\qb\"" [str "aqb"] -- unknown escape keeps the char
+  , ok "\"a\\qb\"" [str "aqb"]
   , ok "\"\\x41\"" [str "A"]
-  , ok "\"\\x4142\"" [str "A42"] -- only two hex digits consumed
+  , ok "\"\\x4142\"" [str "A42"]
   , ok "\"\\u0041\"" [str "A"]
   , ok "\"\\u{1F600}\"" [str "\128512"]
   , ok "\"\\0\"" [str "\0"]
@@ -133,7 +133,7 @@ symbols =
   , ok " --x" [TSym "-", TSym "-", TIden "x"]
   , ok "a-=-1" [TIden "a", TSym "-=", TSym "-", num "1"]
   , ok "a<b>c" [TIden "a", TSym "<", TIden "b", TSym ">", TIden "c"]
-  , ok "a<-1" [TIden "a", TSym "<", TSym "-", num "1"] -- changes if `<-` is added
+  , ok "a<-1" [TIden "a", TSym "<", TSym "-", num "1"]
   , ok "x!=1" [TIden "x", TSym "!=", num "1"]
   , ok "x! = 1" [TIden "x", TSym "!", TSym "=", num "1"]
   , ok "a = = b" [TIden "a", TSym "=", TSym "=", TIden "b"]
@@ -163,9 +163,9 @@ privates =
 regexes :: [Test]
 regexes =
   [ ok "r\"[a-z]+\"" [TLit (LReg "[a-z]+" "")]
-  , ok "r\"\\d+\"" [TLit (LReg "\\d+" "")] -- backslash preserved
+  , ok "r\"\\d+\"" [TLit (LReg "\\d+" "")]
   , ok "r\"\"" [TLit (LReg "" "")]
-  , ok "r\"a\\\"b\"" [TLit (LReg "a\"b" "")] -- \" drops the backslash
+  , ok "r\"a\\\"b\"" [TLit (LReg "a\"b" "")]
   , ok "r\"\\d+\"g" [TLit (LReg "\\d+" "g")]
   , ok "r\"[a-z]\"gi" [TLit (LReg "[a-z]" "gi")]
   , ok "r\"x\"gimsuydv" [TLit (LReg "x" "gimsuydv")]
@@ -248,9 +248,9 @@ fails =
   , "@"
   , "~"
   , "\\"
-  , "\"\\x4\"" -- incomplete \x escape
-  , "\"\\u041\"" -- incomplete \u escape
-  , "r\"abc" -- unterminated regex
+  , "\"\\x4\""
+  , "\"\\u041\""
+  , "r\"abc"
   ]
 
 positions :: [Test]

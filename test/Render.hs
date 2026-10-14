@@ -17,16 +17,18 @@ render = \case
   EOptApp f as      -> form "?.()" (render f : fmap element as)
   EIndex e i        -> form "[]" [render e, render i]
   EOptIndex e i     -> form "?.[]" [render e, render i]
-  ENew e            -> form "new" [render e]
+  ENew e as         -> form "new" (render e : fmap element as)
+  ENewTarget        -> "new.target"
   EUnOp o e         -> form (unop2str o) [render e]
   EBinOp o a b      -> form (binop2str o) [render a, render b]
   EAssign o a b     -> form (assignop2str o) [render a, render b]
   EThrow e          -> form "throw" [render e]
-  EImport c src     -> form "import" (impClause c <> [show src])
+  EImport c m       -> form "import" (impClause c <> modRef m)
   EImportCall as    -> form "import()" (fmap element as)
   EImportMeta       -> "import.meta"
   EExportDecl e     -> form "export" [render e]
-  EExport c mfrom   -> form "export" (expClause c : maybe [] (pure . show) mfrom)
+  EExportDefault e  -> form "export-default" [render e]
+  EExport c mm      -> form "export" (expClause c : maybe [] modRef mm)
   EClass cd         -> form "class" (classParts cd)
   EDecl t p e       -> form (if t == LetDecl then "let" else "const") [render p, render e]
   EBlock _ (BlockKey k) xs -> form k (fmap render xs)
@@ -53,9 +55,11 @@ field (OFSpread e)              = "..." <> render e
 field (OFKeyVal k v)            = key k <> ":" <> render v
 field (OFShort (Ident s))       = s
 field (OFShortInit (Ident s) e) = s <> "=" <> render e
+field (OFMethod k sig b)        = methodForm k sig b
 
 key :: PropKey -> String
 key (PKMem m)  = mem m
+key (PKLit l)  = litDat l
 key (PKComp e) = "[" <> render e <> "]"
 
 mem :: MemName -> String
@@ -69,6 +73,9 @@ params sig = "(" <> unwords (fmap param (fsParams sig)) <> ")"
     param (LPPlain p (Just d)) = render p <> "=" <> render d
     param (LPRest p)           = "..." <> render p
 
+methodForm :: PropKey -> FuncSig -> Expr -> String
+methodForm k sig b = form (if fsIsAsync sig then "async-method" else "method") [key k, params sig, render b]
+
 classParts :: ClassDecl -> [String]
 classParts (ClassDecl name ext mems) =
   maybe [] (\(Ident s) -> [s]) name
@@ -77,15 +84,15 @@ classParts (ClassDecl name ext mems) =
   where
     member m = (if cmStatic m then \s -> form "static" [s] else id) $ case m of
       CMField _ k mv    -> form "field" (key k : maybe [] (pure . render) mv)
-      CMethod _ k sig b -> form (if fsIsAsync sig then "async-method" else "method") [key k, params sig, render b]
+      CMethod _ k sig b -> methodForm k sig b
 
 impClause :: ImportClause -> [String]
-impClause ImpBare                  = []
-impClause (ImpNamed ss)            = [wrap "{" "}" (fmap spec ss)]
+impClause (ImportClause md mb) = maybe [] (\(Ident d) -> [d]) md <> maybe [] binds mb
   where
+    binds (ImpNamed ss)            = [wrap "{" "}" (fmap spec ss)]
+    binds (ImpNamespace (Ident n)) = ['*' : n]
     spec (ImportSpec n Nothing)          = n
     spec (ImportSpec n (Just (Ident a))) = form "as" [n, a]
-impClause (ImpNamespace (Ident n)) = ['*' : n]
 
 expClause :: ExportClause -> String
 expClause (ExpNamed ss) = wrap "{" "}" (fmap spec ss)
@@ -94,6 +101,12 @@ expClause (ExpNamed ss) = wrap "{" "}" (fmap spec ss)
     spec (ExportSpec n (Just a)) = form "as" [n, a]
 expClause ExpAll        = "*"
 expClause (ExpAllAs n)  = '*' : n
+
+-- empty attribute lists render as absent, since `with {}` means nothing
+modRef :: ModuleRef -> [String]
+modRef (ModuleRef src attrs) = show src : [ form "with" [wrap "{" "}" (fmap attr attrs)] | not (null attrs) ]
+  where
+    attr (k, v) = k <> ":" <> show v
 
 catchPart :: Maybe TryCatch -> [String]
 catchPart Nothing                  = []

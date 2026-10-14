@@ -1,3 +1,4 @@
+{- HLINT ignore "Functor law" -}
 module Lexer where
 
 import Control.Monad
@@ -9,7 +10,7 @@ import Data.Void
 import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
-import Data.Maybe (maybeToList)
+import Data.Maybe (fromMaybe, isJust, maybeToList)
 import Data.Ord (Down(..))
 
 identHead :: Char -> Bool
@@ -27,9 +28,9 @@ lexeme :: Lexer a -> Lexer a
 lexeme p = p <* skipSpace
 
 symbol :: String -> Lexer String
-symbol s = lexeme (string s <* notFollowedBy (satisfy identBody))
+symbol s = string s <* notFollowedBy (satisfy identBody)
 
-data TokInfo = TokInfo { tokStart :: SourcePos, tokStr :: String, tokVal :: Tok }
+data TokInfo = TokInfo { tokStart :: SourcePos, tokEnd :: SourcePos, tokStr :: String, tokVal :: Tok }
   deriving (Eq, Ord, Show)
 
 instance VisualStream [TokInfo] where
@@ -88,59 +89,145 @@ nullL = label "null" $ do
 
 boolL :: Lexer Tok
 boolL = label "bool" $ do
-  b <- try $ choice ([symbol "true", symbol "false"])
+  b <- try $ choice [symbol "true", symbol "false"]
   return $ TLit (LBool b)
+
+validSeps :: String -> Bool
+validSeps ds = take 1 ds /= "_" && take 1 (reverse ds) /= "_" && not ("__" `DL.isInfixOf` ds)
+
+digitsL :: (Char -> Bool) -> Lexer String
+digitsL isDig = do
+  ds <- some (satisfy (\c -> isDig c || c == '_'))
+  if validSeps ds
+    then return ds
+    else fail "a numeric separator `_` must sit between two digits"
+
+baseDigit :: Char -> Char -> Bool
+baseDigit b c
+  | b `elem` "xX" = isHexDigit c
+  | b `elem` "oO" = isOctDigit c
+  | otherwise     = c == '0' || c == '1'
+
+prefixedL :: Lexer String
+prefixedL = do
+  b <- try (char '0' *> oneOf "xXoObB")
+  ds <- digitsL (baseDigit b) <?> "digit"
+  n <- optional (char 'n')
+  return ('0' : b : ds ++ maybeToList n)
+
+fractionL :: Lexer String
+fractionL = do
+  char '.'
+  ds <- digitsL isDigit <?> "digit after the decimal point"
+  return ('.' : ds)
+
+exponentL :: Lexer String
+exponentL = do
+  e <- oneOf "eE"
+  sign <- optional (oneOf "+-")
+  ds <- digitsL isDigit <?> "exponent digit"
+  return (e : maybeToList sign ++ ds)
+
+decimalL :: Lexer String
+decimalL = do
+  lookAhead digitChar
+  i <- digitsL isDigit
+  when (length i > 1 && take 1 i == "0") (fail "a number cannot start with a leading zero")
+  f <- optional fractionL
+  e <- optional exponentL
+  n <- if isJust f || isJust e then return Nothing else optional (char 'n')
+  return (i ++ fromMaybe "" f ++ fromMaybe "" e ++ maybeToList n)
+
+dotL :: Lexer String
+dotL = do
+  try (char '.' <* lookAhead digitChar)
+  ds <- digitsL isDigit
+  e <- optional exponentL
+  return ('.' : ds ++ fromMaybe "" e)
+
+numEndL :: Lexer ()
+numEndL = do
+  next <- optional (lookAhead (satisfy identBody))
+  case next of
+    Just _  -> fail "a number cannot be followed directly by a letter or digit"
+    Nothing -> return ()
+
+numBodyL :: Lexer String
+numBodyL = do
+  s <- choice [prefixedL, decimalL, dotL]
+  numEndL
+  return s
 
 numL :: Lexer Tok
 numL = label "number" $ do
-  n <- try prefixL <|> decimalL
-  return $ TLit (LNum n)
-  where
-    prefixL = do
-      z <- char '0'
-      b <- oneOf "xXoObB"
-      ds <- some (hexDigitChar <|> char '_')
-      n <- optional (char 'n')
-      return $ z : b : ds ++ maybe [] pure n
-    decimalL = do
-      d <- digitL
-      f <- optional ((:) <$> char '.' <*> digitL)
-      e <- optional expL
-      n <- optional (char 'n')
-      return $ d <> maybe [] id f <> maybe [] id e <> maybe [] pure n
-    digitL  = (:) <$> digitChar <*> many (digitChar <|> char '_')
-    expL = do
-      x <- oneOf "eE"
-      y <- optional (oneOf "+-")
-      z <- digitL
-      return $ x : maybeToList y ++ z
+  o <- getOffset
+  s <- region (setErrorOffset o) numBodyL
+  return $ TLit (LNum s)
 
-escChar :: Lexer Char
-escChar = char '\\' *> (esc <|> anySingle)
-  where
-    esc = choice
-      [ '\n' <$ char 'n'
-      , '\t' <$ char 't'
-      , '\r' <$ char 'r'
-      , '\b' <$ char 'b'
-      , '\f' <$ char 'f'
-      , '\v' <$ char 'v'
-      , '\0' <$ try (char '0' <* notFollowedBy digitChar)
-      , char 'x' *> hexN 2
-      , char 'u' *> uEsc
-      ]
-    uEsc = (char '{' *> hexVar <* char '}') <|> hexN 4
-    hexN n = toEnum <$> (read . ("0x" ++) <$> count n hexDigitChar)
-    hexVar = toEnum <$> (read . ("0x" ++) <$> some hexDigitChar)
+hexN :: Int -> Lexer Char
+hexN n = toEnum <$> (read . ("0x" ++) <$> count n hexDigitChar)
 
-strChar :: Char -> Lexer Char
-strChar q = escChar <|> satisfy (\c -> c /= q && c /= '\\')
+hexVar :: Lexer Char
+hexVar = do
+  ds <- some hexDigitChar
+  let v = read ("0x" ++ ds) :: Integer
+  if v > 0x10FFFF
+    then fail "a unicode escape cannot exceed \\u{10FFFF}"
+    else return (toEnum (fromInteger v))
+
+uEsc :: Lexer Char
+uEsc = (char '{' *> hexVar <* char '}') <|> hexN 4
+
+zeroEsc :: Lexer Char
+zeroEsc = do
+  char '0'
+  (digitChar *> fail "octal escapes are not allowed") <|> return '\0'
+
+octalEsc :: Lexer Char
+octalEsc = oneOf "123456789" *> fail "octal escapes are not allowed"
+
+escBody :: Lexer Char
+escBody = choice
+  [ '\n' <$ char 'n'
+  , '\t' <$ char 't'
+  , '\r' <$ char 'r'
+  , '\b' <$ char 'b'
+  , '\f' <$ char 'f'
+  , '\v' <$ char 'v'
+  , zeroEsc
+  , octalEsc
+  , char 'x' *> hexN 2
+  , char 'u' *> uEsc
+  , anySingle
+  ]
+
+lineTermL :: Lexer ()
+lineTermL = choice
+  [ void (string "\r\n")
+  , void (char '\n')
+  , void (char '\r')
+  , void (char '\x2028')
+  , void (char '\x2029')
+  ]
+
+escapeL :: Lexer String
+escapeL = do
+  char '\\'
+  ("" <$ lineTermL) <|> ((: []) <$> escBody)
+
+strPiece :: Char -> Lexer String
+strPiece q = choice
+  [ escapeL
+  , "\n" <$ string "\r\n"
+  , "\n" <$ char '\r'
+  , (: []) <$> satisfy (\c -> c /= q && c /= '\\')
+  ]
 
 strL :: Lexer Tok
 strL = label "string" $ do
   q <- char '"' <|> char '\'' <|> char '`'
-  s <- manyTill (strChar q) (char q)
-  return $ TLit (LStr s)
+  pieces <- manyTill (strPiece q) (char q)
+  return $ TLit (LStr (concat pieces))
 
 litL :: Lexer Tok
 litL = label "literal" $ choice [nullL, boolL, numL, regL, strL]
@@ -172,7 +259,8 @@ regL = label "regex" $ do
 ops :: [String]
 ops = DL.sortOn (Down . length) . concatMap words $
   [ "... ?. ."
-  , "! **"
+  , "! ~ **"
+  , "++ --"
   , "* / %"
   , "+ -"
   , "<< >> >>>"
@@ -182,7 +270,7 @@ ops = DL.sortOn (Down . length) . concatMap words $
   , "=>"
   , "= += -= *= /= %= **= <<= >>= >>>= &= |= ^= &&= ||= ??="
   , ", :"
-  , "? -> ::" -- reserved for future use
+  , "? -> ::"
   ]
 
 symL :: Lexer Tok
@@ -208,7 +296,7 @@ keyL = label "keyword" $ do
 
 braL :: Lexer Tok
 braL = label "bracket" $ do
-  bra <- satisfy (flip elem "({[]})")
+  bra <- satisfy (`elem` "({[]})")
   return $ TBracket bra
 
 semiL :: Lexer Tok
@@ -220,18 +308,19 @@ mkTokInfo :: Lexer Tok -> Lexer TokInfo
 mkTokInfo p = do
   s <- getSourcePos
   t <- p
-  return TokInfo { tokStart = s, tokStr = tokDat t, tokVal = t }
+  e <- getSourcePos
+  return TokInfo { tokStart = s, tokEnd = e, tokStr = tokDat t, tokVal = t }
 
 lexer :: Lexer [TokInfo]
 lexer = do
   skipSpace
-  tokInfo <- many . (mkTokInfo . lexeme) . choice $ [ keyL, symL, braL, semiL, litL, privL, idenL ]
+  tokInfo <- many . lexeme . mkTokInfo . choice $ [ keyL, litL, symL, braL, semiL, privL, idenL ]
   pos <- getSourcePos
   eof
-  return $ tokInfo ++ [TokInfo { tokStart = pos, tokStr = [], tokVal = TEOF }]
+  return $ tokInfo ++ [TokInfo { tokStart = pos, tokEnd = pos, tokStr = [], tokVal = TEOF }]
 
 runLex :: String -> Either (ParseErrorBundle String Void) [TokInfo]
-runLex = runParser (lexer) ""
+runLex = runParser lexer ""
 
 -- auxiliaries needed in both lexer and layout tests
 sm :: Tok

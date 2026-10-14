@@ -3,6 +3,7 @@ module ExprTests (tests) where
 import Prelude hiding (exp)
 
 import Test.HUnit
+import Data.List (isInfixOf)
 import qualified Data.List.NonEmpty as NE
 import Text.Megaparsec (errorBundlePretty, bundleErrors, parseErrorTextPretty, sepEndBy)
 
@@ -42,6 +43,12 @@ bad inp = TestCase $ case parseExpr inp of
   Left _  -> return ()
   Right e -> assertFailure ("expected failure on " <> show inp <> ", got " <> render e)
 
+-- fails, and the error text mentions the given fragment
+badMsg :: String -> String -> Test
+badMsg inp frag = TestCase $ case parseExpr inp of
+  Left err -> assertBool ("error on " <> show inp <> " lacks " <> show frag <> ": " <> err) (frag `isInfixOf` err)
+  Right e  -> assertFailure ("expected failure on " <> show inp <> ", got " <> render e)
+
 top :: String -> [String] -> Test
 top inp exp = TestCase $ case parseTop inp of
   Left err -> assertFailure ("failed on " <> show inp <> ": " <> err)
@@ -54,8 +61,8 @@ badTop inp = TestCase $ case parseTop inp of
 
 tests :: Test
 tests = TestList $ concat
-  [ atoms, arrays, objects, postfix, privateMembers, spreadArgs, newTests
-  , unary, binary, precedence, nonAssoc, ins, deletes
+  [ atoms, arrays, objects, objectMethods, literalNames, postfix, privateMembers, spreadArgs, newTests
+  , unary, incDec, binary, precedence, mixing, nonAssoc, ins, deletes
   , lambdas, params, asyncs, trailingCommas
   , conditionals, tries, throws, assignment, declarations, patterns, keywordBindings
   , classes, reservedMembers, imports, exports, blocks, loops, grouping
@@ -64,7 +71,7 @@ tests = TestList $ concat
 
 atoms :: [Test]
 atoms =
-  [ ok s s | s <- ["x", "_x", "42", "1.5", "\"a\"", "true", "false", "null", "r\"\\d+\"g"] ] <> [ ok "'a'" "\"a\"" ]
+  [ ok s s | s <- ["x", "_x", "42", "1.5", "\"a\"", "true", "false", "null", "r\"\\d+\"g", ".5", "0x1F", "1_000n"] ] <> [ ok "'a'" "\"a\"" ]
 
 arrays :: [Test]
 arrays =
@@ -100,6 +107,18 @@ objects =
   , ok "{ a = 1 }" "{a=1}"
   , ok "{ a: b = 1 }" "{a:(= b 1)}"
 
+  -- string and number keys
+  , ok "{ \"a\": 1 }" "{\"a\":1}"
+  , ok "{ \"a-b\": 1 }" "{\"a-b\":1}"
+  , ok "{ 'a': 1 }" "{\"a\":1}"
+  , ok "{ 1: x }" "{1:x}"
+  , ok "{ 1.5: x }" "{1.5:x}"
+  , ok "{ .5: x }" "{.5:x}"
+  , ok "{ 0x1F: x }" "{0x1F:x}"
+  , ok "{ 1n: x }" "{1n:x}"
+  , ok "{ \"__proto__\": p }" "{\"__proto__\":p}"
+  , ok "{ a: 1, \"b\": 2, 3: c, [d]: e }" "{a:1 \"b\":2 3:c [d]:e}"
+
   , bad "{ if }"
   , bad "{ a: }"
   , bad "{ a 1 }"
@@ -108,13 +127,60 @@ objects =
   , bad "{ 1 }"
   , bad "{ [k] }"
   , bad "{ \"a\" = 1 }"
+  , bad "{ 1 = 1 }"
   , bad "{ [k]: }"
+  , bad "{ \"a\": }"
   , bad "{ #a: 1 }"
   , bad "{ #a }"
-  , bad "{ \"a\": 1 }"   -- divergence: bare string keys; use [\"a\"]
-  , bad "{ \"a-b\": 1 }"
-  , bad "{ 1: x }"
-  , bad "{ 1.5: x }"
+  , bad "{ r\"x\": 1 }"
+  ]
+
+objectMethods :: [Test]
+objectMethods =
+  [ ok "{ fn f(x) => x }" "{(method f (x) x)}"
+  , ok "{ async fn f() => 1 }" "{(async-method f () 1)}"
+  , ok "{ fn [k]() => 1 }" "{(method [k] () 1)}"
+  , ok "{ fn \"a-b\"() => 1 }" "{(method \"a-b\" () 1)}"
+  , ok "{ fn 0() => 1 }" "{(method 0 () 1)}"
+  , ok "{ fn if() => 1 }" "{(method if () 1)}"
+  , ok "{ fn fn() => 1 }" "{(method fn () 1)}"
+  , ok "{ fn async() => 1 }" "{(method async () 1)}"
+  , ok "{ fn f(...xs) => xs }" "{(method f (...xs) xs)}"
+  , ok "{ fn f({ a }) => a }" "{(method f ({a}) a)}"
+  , ok "{ fn f() => do { a; b } }" "{(method f () (do a b))}"
+  , ok "{ a: 1, fn f() => this.a }" "{a:1 (method f () (. this a))}"
+  , ok "{ fn f() => 1, fn g() => 2, }" "{(method f () 1) (method g () 2)}"
+
+  -- fn and async remain usable as plain keys
+  , ok "{ fn: 1 }" "{fn:1}"
+  , ok "{ async: 1 }" "{async:1}"
+  , ok "{ async }" "{async}"
+  , ok "{ async = 1 }" "{async=1}"
+
+  , bad "{ fn #f() => 1 }"
+  , bad "{ fn f() }"
+  , bad "{ fn f() => }"
+  , bad "{ fn f }"
+  , bad "{ fn () => 1 }"
+  , bad "{ async f() => 1 }"
+  , bad "{ static fn f() => 1 }"
+  , bad "{ fn f() => 1 g }"
+  ]
+
+-- null, true, false are valid property names in JS
+literalNames :: [Test]
+literalNames =
+  [ ok "a.null" "(. a null)"
+  , ok "a.true" "(. a true)"
+  , ok "a?.false" "(?. a false)"
+  , ok "{ null: 1, true: 2 }" "{null:1 true:2}"
+  , ok "{ fn null() => 1 }" "{(method null () 1)}"
+  , ok "class A where { fn true() => 1 }" "(class A {(method true () 1)})"
+  , ok "import { null as n } from \"m\"" "(import {(as null n)} \"m\")"
+  , ok "export { a as true }" "(export {(as a true)})"
+
+  , bad "{ null }"
+  , bad "{ true = 1 }"
   ]
 
 postfix :: [Test]
@@ -140,6 +206,7 @@ postfix =
   , bad "a."
   , bad "a?."
   , bad "a.1"
+  , bad "a.5"
   , bad "a[]"
   , bad "f(a"
   ]
@@ -174,27 +241,61 @@ spreadArgs =
   , ok "f(...xs.ys)" "(f ...(. xs ys))"
   , ok "f(...xs)(y)" "((f ...xs) y)"
   , ok "a?.(...xs)" "(?.() a ...xs)"
-  , ok "new Foo(...args)" "(new (Foo ...args))"
-  , ok "new Foo(a, ...bs)" "(new (Foo a ...bs))"
+  , ok "new Foo(...args)" "(new Foo ...args)"
+  , ok "new Foo(a, ...bs)" "(new Foo a ...bs)"
 
   , bad "f(...)"
   , bad "f(... , a)"
   , bad "f(xs...)"
   ]
 
+-- `new` binds exactly as in JS
 newTests :: [Test]
 newTests =
-  [ ok "new Foo()" "(new (Foo))"
-  , ok "new Foo(x)" "(new (Foo x))"
-  , ok "new Foo(x, y)" "(new (Foo x y))"
-  , ok "new a.b.C(x)" "(new ((. (. a b) C) x))"
-  , ok "new Foo[0](x)" "(new (([] Foo 0) x))"
-  , ok "new (f())(x)" "(new ((f) x))"
-  , ok "new Foo().bar" "(new (. (Foo) bar))"  -- divergence: `new` binds loosely
-  , ok "new Foo()(x)" "(new ((Foo) x))"       -- divergence: `new` binds loosely
+  [ ok "new Foo()" "(new Foo)"
   , ok "new Foo" "(new Foo)"
+  , ok "new Foo(x)" "(new Foo x)"
+  , ok "new Foo(x, y)" "(new Foo x y)"
+  , ok "new a.b.C(x)" "(new (. (. a b) C) x)"
+  , ok "new Foo[0](x)" "(new ([] Foo 0) x)"
+  , ok "new Foo.bar" "(new (. Foo bar))"
+  , ok "new Foo.bar()" "(new (. Foo bar))"
+  , ok "new (Foo)()" "(new Foo)"
+  , ok "new (f())" "(new (f))"
+  , ok "new (f())(x)" "(new (f) x)"
+  , ok "new this.Foo()" "(new (. this Foo))"
+  , ok "new import.meta.Foo()" "(new (. import.meta Foo))"
+
+  -- postfix operations after the arguments apply to the new object
+  , ok "new Foo().bar" "(. (new Foo) bar)"
+  , ok "new Foo()(x)" "((new Foo) x)"
+  , ok "new Foo()[0]" "([] (new Foo) 0)"
+  , ok "new Foo()?.bar" "(?. (new Foo) bar)"
+  , ok "new Date().getTime()" "((. (new Date) getTime))"
+  , ok "new Foo(x).y(z)" "((. (new Foo x) y) z)"
+
+  , ok "new new Foo()()" "(new (new Foo))"
+  , ok "new new Foo" "(new (new Foo))"
+
+  , ok "-new Foo()" "(- (new Foo))"
+  , ok "await new Foo()" "(await (new Foo))"
+  , ok "new Foo + 1" "(+ (new Foo) 1)"
+
+  , ok "new.target" "new.target"
+  , ok "new.target.name" "(. new.target name)"
+  , ok "new.target()" "(new.target)"
+  , ok "new new.target()" "(new new.target)"
 
   , bad "new"
+  , bad "new Foo(x"
+  , bad "new a?.b()"
+  , bad "new a?.b"
+  , bad "new -x"
+  , bad "new typeof x"
+  , bad "new await x"
+  , bad "new import(\"m\")"
+  , bad "new.foo"
+  , bad "new."
   ]
 
 unary :: [Test]
@@ -204,8 +305,13 @@ unary =
   [ ok "-x" "(- x)"
   , ok "!x" "(! x)"
   , ok "- -x" "(- (- x))"
-  , ok "--x" "(- (- x))"  -- divergence: no decrement
+  , ok "+ +x" "(+ (+ x))"
   , ok "!!x" "(! (! x))"
+  , ok "~x" "(~ x)"
+  , ok "~~x" "(~ (~ x))"
+  , ok "-~x" "(- (~ x))"
+  , ok "~-x" "(~ (- x))"
+  , ok "~a + b" "(+ (~ a) b)"
   , ok "typeof typeof x" "(typeof (typeof x))"
   , ok "void 0" "(void 0)"
   , ok "await f()" "(await (f))"
@@ -213,7 +319,26 @@ unary =
   , ok "-f(x)" "(- (f x))"
 
   , bad "-"
+  , bad "~"
   , bad "typeof"
+  ]
+
+-- ++ and -- are not supported; the error suggests the alternative
+incDec :: [Test]
+incDec =
+  [ badMsg "x++" "+= 1"
+  , badMsg "++x" "+= 1"
+  , badMsg "x--" "-= 1"
+  , badMsg "--x" "-= 1"
+  , badMsg "a.b++" "+= 1"
+  , badMsg "f(x++)" "+= 1"
+  , badMsg "[--x]" "-= 1"
+
+  , bad "a++b"
+  , bad "a--b"
+
+  , ok "a - -b" "(- a (- b))"
+  , ok "a + +b" "(+ a (+ b))"
   ]
 
 binary :: [Test]
@@ -250,12 +375,10 @@ precedence =
   , ok "a && b || c" "(|| (&& a b) c)"
   , ok "a && b && c" "(&& a (&& b c))"
   , ok "a || b || c" "(|| a (|| b c))"
-  , ok "a || b ?? c" "(?? (|| a b) c)"  -- divergence: ?? mixes freely
   , ok "a ?? b ?? c" "(?? a (?? b c))"
   , ok "a < b == c < d" "(== (< a b) (< c d))"
 
   , ok "-a * b" "(* (- a) b)"
-  , ok "-a ** b" "(** (- a) b)"         -- divergence: legal, = (-a) ** b
   , ok "-a + b" "(+ (- a) b)"
   , ok "a + -b" "(+ a (- b))"
   , ok "a ** -b" "(** a (- b))"
@@ -268,6 +391,44 @@ precedence =
   , ok "(a + b) * c" "(* (+ a b) c)"
   , ok "a * (b + c)" "(* a (+ b c))"
   , ok "((a))" "a"
+  ]
+
+-- JS forbids mixing ?? with || or &&, and a unary operand left of **
+mixing :: [Test]
+mixing =
+  [ ok "(a || b) ?? c" "(?? (|| a b) c)"
+  , ok "a ?? (b || c)" "(?? a (|| b c))"
+  , ok "(a && b) ?? c" "(?? (&& a b) c)"
+  , ok "a ?? (b && c)" "(?? a (&& b c))"
+  , ok "a | b ?? c" "(?? (| a b) c)"
+  , ok "a ?? b == c" "(?? a (== b c))"
+
+  , ok "(-a) ** b" "(** (- a) b)"
+  , ok "-(a ** b)" "(- (** a b))"
+  , ok "(typeof a) ** b" "(** (typeof a) b)"
+  , ok "a ** -b" "(** a (- b))"
+  , ok "a ** (-b) ** c" "(** a (** (- b) c))"
+  , ok "new Foo ** 2" "(** (new Foo) 2)"
+  , ok "a.b ** 2" "(** (. a b) 2)"
+
+  , bad "a ?? b || c"
+  , bad "a || b ?? c"
+  , bad "a && b ?? c"
+  , bad "a ?? b && c"
+  , bad "a ?? b || c ?? d"
+  , bad "a || b && c ?? d"
+
+  , bad "-a ** b"
+  , bad "+a ** b"
+  , bad "!a ** b"
+  , bad "~a ** b"
+  , bad "- -a ** b"
+  , bad "typeof a ** b"
+  , bad "void a ** b"
+  , bad "delete a ** b"
+  , bad "await a ** b"
+  , bad "a ** -b ** c"
+  , bad "a * -b ** c"
   ]
 
 nonAssoc :: [Test]
@@ -382,7 +543,7 @@ trailingCommas =
   , ok "f(a, b,)" "(f a b)"
   , ok "f(...xs,)" "(f ...xs)"
   , ok "a?.(x,)" "(?.() a x)"
-  , ok "new Foo(x,)" "(new (Foo x))"
+  , ok "new Foo(x,)" "(new Foo x)"
   , ok "fn(x,) => x" "(fn (x) x)"
   , ok "fn(x, y = 1,) => x" "(fn (x y=1) x)"
 
@@ -439,7 +600,7 @@ tries =
 throws :: [Test]
 throws =
   [ ok "throw e" "(throw e)"
-  , ok "throw new Error(\"x\")" "(throw (new (Error \"x\")))"
+  , ok "throw new Error(\"x\")" "(throw (new Error \"x\"))"
   , ok "throw a ?? b" "(throw (?? a b))"
   , ok "fn() => throw e" "(fn () (throw e))"
   , ok "if c then x else throw e" "(if c x (throw e))"
@@ -526,6 +687,8 @@ patterns =
   , ok "let { a: [b, { c }] } = o" "(let {a:[b {c}]} o)"
   , ok "let { [\"a-b\"]: x } = o" "(let {[\"a-b\"]:x} o)"
   , ok "let { [0]: x } = o" "(let {[0]:x} o)"
+  , ok "let { \"a-b\": x } = o" "(let {\"a-b\":x} o)"
+  , ok "let { 0: x } = o" "(let {0:x} o)"
   , ok "fn({ a, b }) => a" "(fn ({a b}) a)"
   , ok "fn([x, y]) => x" "(fn ([x y]) x)"
   , ok "fn([first, ...others]) => first" "(fn ([first ...others]) first)"
@@ -585,6 +748,17 @@ classes =
   , ok "class A where { fn delete(id) => id }" "(class A {(method delete (id) id)})"
   , ok "class A where { fn #check(o) => #x in o }" "(class A {(method #check (o) (in #x o))})"
 
+  -- string and number keys
+  , ok "class A where { \"a-b\" = 1 }" "(class A {(field \"a-b\" 1)})"
+  , ok "class A where { 0 = 1 }" "(class A {(field 0 1)})"
+  , ok "class A where { \"a\" }" "(class A {(field \"a\")})"
+  , ok "class A where { fn \"a-b\"() => 1 }" "(class A {(method \"a-b\" () 1)})"
+  , ok "class A where { fn 0() => 1 }" "(class A {(method 0 () 1)})"
+  , ok "class A where { static \"a\" = 1 }" "(class A {(static (field \"a\" 1))})"
+  , ok "class A where { static \"a\" }" "(class A {(static (field \"a\"))})"
+  , ok "class A where { static 0 = 1 }" "(class A {(static (field 0 1))})"
+  , ok "class A where { static fn \"a\"() => 1 }" "(class A {(static (method \"a\" () 1))})"
+
   , ok "class A where { static count = 0 }" "(class A {(static (field count 0))})"
   , ok "class A where { static #n = 0 }" "(class A {(static (field #n 0))})"
   , ok "class A where { static fn f() => 1 }" "(class A {(static (method f () 1))})"
@@ -606,6 +780,7 @@ classes =
   , bad "class A extends where {}"
   , bad "class A where { x = }"
   , bad "class A where { x = 1"
+  , bad "class A where { \"a\" \"b\" }"
   ]
 
 reservedMembers :: [Test]
@@ -617,6 +792,7 @@ reservedMembers =
   , ok "class A where { fn = 1 }" "(class A {(field fn 1)})"
   , ok "class A where { fn static() => 1 }" "(class A {(method static () 1)})"
   , ok "class A where { static [\"readonly\"] = true }" "(class A {(static (field [\"readonly\"] true))})"
+  , ok "class A where { static \"readonly\" = true }" "(class A {(static (field \"readonly\" true))})"
   ]
 
 imports :: [Test]
@@ -625,30 +801,72 @@ imports =
   , ok "import { a } from \"m\"" "(import {a} \"m\")"
   , ok "import { a, b as c } from \"m\"" "(import {a (as b c)} \"m\")"
   , ok "import { default as React } from \"react\"" "(import {(as default React)} \"react\")"
-  , ok "import { default } from \"m\"" "(import {default} \"m\")"
   , ok "import { delete as del } from \"m\"" "(import {(as delete del)} \"m\")"
-  , ok "import { a as default } from \"m\"" "(import {(as a default)} \"m\")"
   , ok "import { as } from \"m\"" "(import {as} \"m\")"
   , ok "import { as as x } from \"m\"" "(import {(as as x)} \"m\")"
   , ok "import * as ns from \"m\"" "(import *ns \"m\")"
   , ok "import {} from \"m\"" "(import {} \"m\")"
   , ok "import { a, } from \"m\"" "(import {a} \"m\")"
+  , ok "import { \"a-b\" as x } from \"m\"" "(import {(as a-b x)} \"m\")"
 
+  -- default imports
+  , ok "import React from \"react\"" "(import React \"react\")"
+  , ok "import React, { useState } from \"react\"" "(import React {useState} \"react\")"
+  , ok "import React, { a, b as c, } from \"react\"" "(import React {a (as b c)} \"react\")"
+  , ok "import React, {} from \"react\"" "(import React {} \"react\")"
+  , ok "import React, * as R from \"react\"" "(import React *R \"react\")"
+  , ok "import from from \"m\"" "(import from \"m\")"
+  , ok "import as from \"m\"" "(import as \"m\")"
+
+  -- parser accepts; the validator rejects `default` as a binding
+  , ok "import { default } from \"m\"" "(import {default} \"m\")"
+  , ok "import { a as default } from \"m\"" "(import {(as a default)} \"m\")"
+
+  -- attributes
+  , ok "import data from \"./d.json\" with { type: \"json\" }" "(import data \"./d.json\" (with {type:\"json\"}))"
+  , ok "import \"m\" with { type: \"css\" }" "(import \"m\" (with {type:\"css\"}))"
+  , ok "import { a } from \"m\" with { \"type\": \"json\" }" "(import {a} \"m\" (with {type:\"json\"}))"
+  , ok "import * as ns from \"m\" with { type: \"json\", }" "(import *ns \"m\" (with {type:\"json\"}))"
+  , ok "import x from \"m\" with { a: \"1\", b: \"2\" }" "(import x \"m\" (with {a:\"1\" b:\"2\"}))"
+  , ok "import x from \"m\" with {}" "(import x \"m\")"
+
+  -- dynamic import and import.meta
   , ok "import(\"m\")" "(import() \"m\")"
+  , ok "import(\"m\",)" "(import() \"m\")"
+  , ok "import(\"m\", { with: { type: \"json\" } })" "(import() \"m\" {with:{type:\"json\"}})"
   , ok "import(\"m\").then(f)" "((. (import() \"m\") then) f)"
   , ok "await import(\"m\")" "(await (import() \"m\"))"
   , ok "import.meta" "import.meta"
   , ok "import.meta.url" "(. import.meta url)"
   , ok "from" "from"
   , ok "let from = 1" "(let from 1)"
+  , ok "with" "with"
 
-  , bad "import x from \"m\""  -- divergence: no default-import shorthand
   , bad "import { a } \"m\""
   , bad "import { a } from m"
   , bad "import * from \"m\""
   , bad "import * as ns"
   , bad "import"
   , bad "import.foo"
+  , bad "import React from"
+  , bad "import React \"m\""
+  , bad "import React, \"m\""
+  , bad "import React, from \"m\""
+  , bad "import * as ns, React from \"m\""
+  , bad "import { a }, React from \"m\""
+  , bad "import React, { a }, * as ns from \"m\""
+  , bad "import React, Other from \"m\""
+  , bad "import \"m\" from \"n\""
+  , bad "import { \"a-b\" } from \"m\""
+  , bad "import { a as \"b\" } from \"m\""
+  , bad "import x from \"m\" with { type: json }"
+  , bad "import x from \"m\" with { type: 1 }"
+  , bad "import x from \"m\" with type"
+  , bad "import()"
+  , bad "import(...xs)"
+  , bad "import(a, ...xs)"
+  , bad "import(a, b, c)"
+  , bad "import(a,,)"
   ]
 
 exports :: [Test]
@@ -663,16 +881,44 @@ exports =
   , ok "export { x as default }" "(export {(as x default)})"
   , ok "export { a, b as c } from \"m\"" "(export {a (as b c)} \"m\")"
   , ok "export { default as React } from \"react\"" "(export {(as default React)} \"react\")"
+  , ok "export { default } from \"m\"" "(export {default} \"m\")"
   , ok "export * from \"m\"" "(export * \"m\")"
   , ok "export * as ns from \"m\"" "(export *ns \"m\")"
 
-  , bad "export default x"  -- divergence: use `export { x as default }`
+  -- export default
+  , ok "export default x" "(export-default x)"
+  , ok "export default 1 + 2" "(export-default (+ 1 2))"
+  , ok "export default x = 1" "(export-default (= x 1))"
+  , ok "export default fn() => 1" "(export-default (fn () 1))"
+  , ok "export default async fn() => 1" "(export-default (async-fn () 1))"
+  , ok "export default class A where {}" "(export-default (class A {}))"
+  , ok "export default class where {}" "(export-default (class {}))"
+  , ok "export default { a: 1 }" "(export-default {a:1})"
+  , ok "export default if a then b else c" "(export-default (if a b c))"
+
+  -- string names
+  , ok "export { a as \"a-b\" }" "(export {(as a a-b)})"
+  , ok "export { \"a-b\" } from \"m\"" "(export {a-b} \"m\")"
+  , ok "export { \"a-b\" as c } from \"m\"" "(export {(as a-b c)} \"m\")"
+  , ok "export * as \"a-b\" from \"m\"" "(export *a-b \"m\")"
+
+  -- attributes
+  , ok "export { a } from \"m\" with { type: \"json\" }" "(export {a} \"m\" (with {type:\"json\"}))"
+  , ok "export * from \"m\" with { type: \"json\" }" "(export * \"m\" (with {type:\"json\"}))"
+  , ok "export * as ns from \"m\" with { type: \"json\" }" "(export *ns \"m\" (with {type:\"json\"}))"
+
   , bad "export x"
   , bad "export 1"
   , bad "export fn f() => 1"
   , bad "export *"
   , bad "export * as ns"
   , bad "export"
+  , bad "export default"
+  , bad "export default let x = 1"
+  , bad "export default const x = 1"
+  , bad "export { \"a-b\" }"        -- a string local name needs `from`
+  , bad "export { \"a-b\" as c }"
+  , bad "export { a } with { type: \"json\" }"
   ]
 
 blocks :: [Test]
@@ -723,6 +969,7 @@ loops =
   , bad "for x of xs { f(x) }"
   , bad "for x of xs where { f(x) }"
   , bad "for x xs do {}"
+  , bad "for if a then b else c of xs do {}"
   , bad "while x { f() }"
   , bad "while do {}"
   , bad "a ?? return"
@@ -815,7 +1062,11 @@ topLevel =
       , "(let dist (fn (a) (do (let dx (. a x)) (* dx dx))))"
       ]
   , top "const load = async fn(url) => do\n  const res = await fetch(url)\n  if res.ok then res.json() else throw new Error(\"failed\")"
-      [ "(const load (async-fn (url) (do (const res (await (fetch url))) (if (. res ok) ((. res json)) (throw (new (Error \"failed\")))))))" ]
+      [ "(const load (async-fn (url) (do (const res (await (fetch url))) (if (. res ok) ((. res json)) (throw (new Error \"failed\"))))))" ]
+
+  , top "const o = {\n  a: 1,\n  fn f() => this.a,\n  fn g() => do\n    log(1)\n    2\n}"
+      [ "(const o {a:1 (method f () (. this a)) (method g () (do (log 1) 2))})" ]
+  , top "const t = new Date()\n  .getTime()" ["(const t ((. (new Date) getTime)))"]
 
   , top "class A where\n  x = 1\n  fn f() => x" ["(class A {(field x 1) (method f () x)})"]
   , top "class B extends A where\n  fn constructor() => do\n    super()\n    this.x = 1\n  fn g() => 2"
@@ -828,6 +1079,11 @@ topLevel =
       [ "(import {a b} \"m\")"
       , "(import *ns \"n\")"
       , "(export (const f (fn (x) ((. ns g) a x))))"
+      ]
+  , top "import React, {\n  useState,\n} from \"react\"\nconst App = fn() => 1\nexport default App"
+      [ "(import React {useState} \"react\")"
+      , "(const App (fn () 1))"
+      , "(export-default App)"
       ]
   , top "export class A where\n  x = 1\n  fn f() => x" ["(export (class A {(field x 1) (method f () x)}))"]
   , top "const App = fn() => 1\nexport { App as default }" ["(const App (fn () 1))", "(export {(as App default)})"]
@@ -857,4 +1113,5 @@ topFailures =
   , badTop "[1, 2"
   , badTop "class A where\n  x = 1\n y"
   , badTop "import { a }\n  from \"m\"\nx y"
+  , badTop "x\n++"
   ]

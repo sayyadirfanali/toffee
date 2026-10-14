@@ -1,3 +1,4 @@
+{- HLINT ignore "Use <$>" -}
 module Expr where
 
 import Control.Monad.Combinators.Expr
@@ -7,9 +8,9 @@ import Lexer
 import Parser
 import Data.Function ((&))
 import Data.Functor (void)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, isNothing)
 
-data UnOp = Neg | Pos | Not | TypeOf | Void | Await | Delete
+data UnOp = Neg | Pos | Not | BNot | TypeOf | Void | Await | Delete
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 unop2str :: UnOp -> String
@@ -17,6 +18,7 @@ unop2str o = case o of
   Neg    -> "-"
   Pos    -> "+"
   Not    -> "!"
+  BNot   -> "~"
   TypeOf -> "typeof"
   Void   -> "void"
   Await  -> "await"
@@ -92,6 +94,7 @@ data MemName
 
 data PropKey
   = PKMem  MemName
+  | PKLit  Lit
   | PKComp Expr
   deriving (Eq, Ord, Show)
 
@@ -110,6 +113,7 @@ data ObjField
   | OFKeyVal    PropKey Expr
   | OFShort     Ident
   | OFShortInit Ident Expr
+  | OFMethod    PropKey FuncSig Expr
   deriving (Eq, Ord, Show)
 
 data ClassMem
@@ -139,10 +143,21 @@ data ImportSpec = ImportSpec
   }
   deriving (Eq, Ord, Show)
 
-data ImportClause
-  = ImpBare
-  | ImpNamed [ImportSpec]
+data ImportBinds
+  = ImpNamed     [ImportSpec]
   | ImpNamespace Ident
+  deriving (Eq, Ord, Show)
+
+data ImportClause = ImportClause
+  { impDefault :: Maybe Ident
+  , impBinds   :: Maybe ImportBinds
+  }
+  deriving (Eq, Ord, Show)
+
+data ModuleRef = ModuleRef
+  { modSource :: String
+  , modAttrs  :: [(String, String)]
+  }
   deriving (Eq, Ord, Show)
 
 data ExportSpec = ExportSpec
@@ -193,7 +208,8 @@ data Expr
   | EIndex      Expr Expr
   | EOptIndex   Expr Expr
 
-  | ENew        Expr
+  | ENew        Expr [Elem]
+  | ENewTarget
 
   | EUnOp       UnOp Expr
   | EBinOp      BinOp Expr Expr
@@ -202,11 +218,12 @@ data Expr
 
   | EThrow      Expr
 
-  | EImport     ImportClause String
-  | EImportCall [Elem]
+  | EImport        ImportClause ModuleRef
+  | EImportCall    [Elem]
   | EImportMeta
-  | EExportDecl Expr
-  | EExport     ExportClause (Maybe String)
+  | EExportDecl    Expr
+  | EExportDefault Expr
+  | EExport        ExportClause (Maybe ModuleRef)
 
   | EClass      ClassDecl
   | EDecl       DeclTyp Expr Expr
@@ -231,7 +248,6 @@ dotsP = symP "..."
 fatP :: Parser String
 fatP = symP "=>"
 
--- `as` is contextual (only meaningful inside import/export specs)
 asP :: Parser ()
 asP = wordP "as"
 
@@ -240,9 +256,10 @@ litP = matchP $ \case
   TLit l -> Just l
   _      -> Nothing
 
-numP :: Parser String
-numP = matchP $ \case
-  TLit (LNum s) -> Just s
+keyLitP :: Parser Lit
+keyLitP = matchP $ \case
+  TLit (LStr s) -> Just (LStr s)
+  TLit (LNum s) -> Just (LNum s)
   _             -> Nothing
 
 identP :: Parser Ident
@@ -257,15 +274,18 @@ privP = matchP $ \case
 
 nameWhereP :: (String -> Bool) -> Parser String
 nameWhereP p = matchP $ \case
-  TIden s | p s -> Just s
-  TKey  s | p s -> Just s
-  _             -> Nothing
+  TIden s        | p s -> Just s
+  TKey  s        | p s -> Just s
+  TLit (LNull s) | p s -> Just s
+  TLit (LBool s) | p s -> Just s
+  _                    -> Nothing
 
 nameP :: Parser String
 nameP = nameWhereP (const True)
 
 wordP :: String -> Parser ()
-wordP s = label s (() <$ nameWhereP (== s))
+wordP s = label s $
+  void $ nameWhereP (== s)
 
 commasP :: Parser a -> Parser [a]
 commasP p = sepEndBy p commaP
@@ -300,8 +320,35 @@ blockOf p = choice
 memNameP :: Parser MemName
 memNameP = label "member name" $ (MNPub <$> nameP) <|> (MNPriv <$> privP)
 
+propKeyP :: Parser PropKey
+propKeyP = label "key" $ choice
+  [ PKMem . MNPub <$> nameP
+  , PKLit <$> keyLitP
+  , PKComp <$> squareP exprE
+  ]
+
+classKeyP :: Parser PropKey
+classKeyP = label "key" $ (PKMem . MNPriv <$> privP) <|> propKeyP
+
+propKeyStartP :: Parser ()
+propKeyStartP = choice
+  [ void nameP
+  , void keyLitP
+  , void (bracketP '[')
+  ]
+
+isPropKeyAhead :: Parser ()
+isPropKeyAhead = void (lookAhead propKeyStartP)
+
+isMemKeyAhead :: Parser ()
+isMemKeyAhead = void (lookAhead (void privP <|> propKeyStartP))
+
 keyColP :: Parser PropKey
-keyColP = try (PKMem . MNPub <$> nameP <* colP) <|> (PKComp <$> squareP exprE <* colP)
+keyColP = choice
+  [ try (PKMem . MNPub <$> nameP <* colP)
+  , PKLit <$> keyLitP <* colP
+  , PKComp <$> squareP exprE <* colP
+  ]
 
 litE :: Parser Expr
 litE = label "literal" $ ELit <$> litP
@@ -310,13 +357,24 @@ identE :: Parser Expr
 identE = label "identifier" $ EIden <$> identP
 
 privInE :: Parser Expr
-privInE = label "private name" $ (EPriv . Ident) <$> privP <* lookAhead (keyP "in")
+privInE = label "private name" $ EPriv . Ident <$> privP <* lookAhead (keyP "in")
+
+importArgsP :: Parser [Elem]
+importArgsP = do
+  args <- argsP
+  case args of
+    [ElemPlain _]              -> return args
+    [ElemPlain _, ElemPlain _] -> return args
+    _                          -> fail "import() takes a module specifier and an optional options object"
+
+importMetaP :: Parser Expr
+importMetaP = EImportMeta <$ (symP "." *> wordP "meta")
 
 importExprE :: Parser Expr
-importExprE = keyP "import" *> choice
-  [ EImportCall <$> argsP
-  , EImportMeta <$ (symP "." *> wordP "meta")
-  ]
+importExprE = keyP "import" *> choice [ EImportCall <$> importArgsP, importMetaP ]
+
+importMetaE :: Parser Expr
+importMetaE = keyP "import" *> importMetaP
 
 elemE :: Parser Elem
 elemE = label "element" $ choice [ ElemSpread <$> (dotsP *> exprE), ElemPlain <$> exprE ]
@@ -328,10 +386,15 @@ arrE :: Parser Expr
 arrE = label "array" $ EArr <$> squareP (commasP elemE)
 
 objE :: Parser Expr
-objE = label "object" $ EObj <$> curlyP (commasP fieldP)
+objE = label "object" $ EObj <$> curlyP (commasP objFieldP)
+
+objFieldP :: Parser ObjField
+objFieldP = choice [ spreadP, methodP, keyValP, shortP ]
   where
-    fieldP  = choice [ spreadP, keyValP, shortP ]
     spreadP = OFSpread <$> (dotsP *> exprE)
+    methodP = do
+      isAsync <- try (fnHeadP <* isPropKeyAhead)
+      OFMethod <$> propKeyP <*> sigTailP isAsync <*> (fatP *> exprE)
     keyValP = OFKeyVal <$> keyColP <*> exprE
     shortP = do
       i <- identP
@@ -368,7 +431,7 @@ tryE = label "try" $ do
   body <- exprE
   mCatch <- optional catchP
   mFinally <- optional (keyP "finally" *> exprE)
-  if mCatch == Nothing && mFinally == Nothing
+  if isNothing mCatch && isNothing mFinally
       then fail "try needs a catch or finally clause"
       else return (ETry body mCatch mFinally)
   where
@@ -380,7 +443,8 @@ tryE = label "try" $ do
       return $ TryCatch binding handler
 
 throwE :: Parser Expr
-throwE = label "throw" $ EThrow <$> (keyP "throw" *> exprE)
+throwE = label "throw" $
+  EThrow <$> (keyP "throw" *> exprE)
 
 memE :: Parser (Expr -> Expr)
 memE = label "member" $ do
@@ -389,10 +453,12 @@ memE = label "member" $ do
   return $ \x -> EMem x m
 
 appE :: Parser (Expr -> Expr)
-appE = label "application" $ flip EApp <$> argsP
+appE = label "application" $
+  flip EApp <$> argsP
 
 indexE :: Parser (Expr -> Expr)
-indexE = label "index" $ flip EIndex <$> squareP exprE
+indexE = label "index" $
+  flip EIndex <$> squareP exprE
 
 optPostE :: Parser (Expr -> Expr)
 optPostE = label "optional" $ do
@@ -403,28 +469,76 @@ optPostE = label "optional" $ do
     , flip EOptIndex <$> squareP exprE
     ]
 
+newE :: Parser Expr
+newE = label "new" $ do
+  keyP "new"
+  newTargetP <|> newCallP
+  where
+    newTargetP = ENewTarget <$ (symP "." *> wordP "target")
+    newCallP = do
+      callee <- newCalleeE
+      notFollowedBy (symP "?.")
+      args <- option [] argsP
+      return (ENew callee args)
+
+newCalleeE :: Parser Expr
+newCalleeE = do
+  prim  <- choice [ newE, identE, litE, arrE, objE, importMetaE, parenP exprE ]
+  postL <- many (choice [ memE, indexE ])
+  return (foldl (&) prim postL)
+
+incDecP :: Parser a
+incDecP = choice
+  [ symP "++" *> fail "`++` is not supported; use `+= 1` instead"
+  , symP "--" *> fail "`--` is not supported; use `-= 1` instead"
+  ]
+
 postfixE :: Parser Expr
 postfixE = do
-  prim  <- choice [ identE, litE, arrE, objE, privInE, importExprE, parenP exprE ]
-  postL <- many $ choice [ optPostE, memE, appE, indexE ]
-  return $ foldl (&) prim postL
+  prim  <- choice [ newE, identE, litE, arrE, objE, privInE, importExprE, parenP exprE ]
+  postL <- many (choice [ optPostE, memE, appE, indexE ])
+  incDecP <|> return ()
+  return (foldl (&) prim postL)
 
-opE :: Parser Expr
-opE = makeExprParser postfixE table
+unopP :: Parser UnOp
+unopP = label "unary operator" $ choice
+  [ Neg    <$ symP "-"
+  , Pos    <$ symP "+"
+  , Not    <$ symP "!"
+  , BNot   <$ symP "~"
+  , TypeOf <$ keyP "typeof"
+  , Void   <$ keyP "void"
+  , Await  <$ keyP "await"
+  , Delete <$ keyP "delete"
+  ]
+
+unaryE :: Parser Expr
+unaryE = choice
+  [ EUnOp <$> unopP <*> unaryE
+  , incDecP
+  , postfixE
+  ]
+
+expE :: Parser Expr
+expE = choice
+  [ EUnOp <$> unopP <*> unaryE
+  , incDecP
+  , powE
+  ]
+
+powE :: Parser Expr
+powE = do
+  base <- postfixE
+  option base (EBinOp Pow base <$> (symP "**" *> expE))
+
+bitE :: Parser Expr
+bitE = makeExprParser expE table
   where
-    unop  o = EUnOp o <$ symP (unop2str o)
-    kunop o = EUnOp o <$ keyP (unop2str o)
     binop o = EBinOp o <$ symP (binop2str o)
     kbin o = EBinOp o <$ keyP (binop2str o)
-    knew = ENew <$ keyP "new"
-
-    prefixop = Prefix $ foldr1 (.) <$> (some . choice $
-      [ unop Neg, unop Pos, unop Not, kunop TypeOf, kunop Void, kunop Await, kunop Delete, knew ])
 
     table =
-      [ [ prefixop ]
-      , [ InfixR (binop Pow) ]
-      , [ InfixL (binop Mul), InfixL (binop Div), InfixL (binop Mod) ]
+      [ [ InfixL (binop Mul), InfixL (binop Div), InfixL (binop Mod) ]
       , [ InfixL (binop Add), InfixL (binop Sub) ]
       , [ InfixL (binop Shl), InfixL (binop Shr), InfixL (binop Ushr) ]
       , [ InfixN (binop Lt), InfixN (binop Lte), InfixN (binop Gt), InfixN (binop Gte)
@@ -433,28 +547,34 @@ opE = makeExprParser postfixE table
       , [ InfixL (binop BAnd) ]
       , [ InfixL (binop BXor) ]
       , [ InfixL (binop BOr) ]
-      , [ InfixR (binop And) ]
-      , [ InfixR (binop Or) ]
-      , [ InfixR (binop Coalesce) ]
       ]
 
--- `static` is only a modifier when a member key follows; otherwise it's a key
+andP :: Expr -> Parser Expr
+andP x = option x $ do
+  symP "&&"
+  y <- bitE
+  EBinOp And x <$> andP y
+
+orP :: Expr -> Parser Expr
+orP x = option x $ do
+  symP "||"
+  y <- bitE >>= andP
+  EBinOp Or x <$> orP y
+
+coalesceP :: Expr -> Parser Expr
+coalesceP x = do
+  symP "??"
+  y <- bitE
+  rest <- option y (coalesceP y)
+  return (EBinOp Coalesce x rest)
+
+opE :: Parser Expr
+opE = do
+  first <- bitE
+  coalesceP first <|> (andP first >>= orP)
+
 staticP :: Parser Bool
 staticP = label "static" $ isJust <$> optional (try (wordP "static" <* isMemKeyAhead))
-
-isMemKeyAhead :: Parser ()
-isMemKeyAhead = void . lookAhead . choice . fmap void $
-  [ nameP
-  , privP
-  , (: []) <$> (bracketP '[')
-  ]
-
-classKeyP :: Parser PropKey
-classKeyP = label "key" $ choice
-  [ PKMem . MNPriv <$> privP
-  , PKMem . MNPub  <$> nameP
-  , PKComp <$> squareP exprE
-  ]
 
 classMemP :: Parser ClassMem
 classMemP = do
@@ -462,7 +582,7 @@ classMemP = do
   methodP isStatic <|> fieldP isStatic
   where
     methodP s = do
-      isAsync <- try (fnHeadP <* lookAhead isMemKeyAhead)
+      isAsync <- try (fnHeadP <* isMemKeyAhead)
       CMethod s <$> classKeyP <*> sigTailP isAsync <*> (fatP *> exprE)
     fieldP s = CMField s <$> classKeyP <*> initP
 
@@ -481,8 +601,20 @@ classE = label "class" $ do
     , cdMembers = mems
     }
 
-fromP :: Parser String
-fromP = label "from" $ wordP "from" *> stringP
+attrsP :: Parser [(String, String)]
+attrsP = option [] (wordP "with" *> curlyP (commasP attrP))
+  where
+    attrP = do
+      k <- nameP <|> stringP
+      colP
+      v <- stringP
+      return (k, v)
+
+moduleRefP :: Parser ModuleRef
+moduleRefP = ModuleRef <$> stringP <*> attrsP
+
+fromP :: Parser ModuleRef
+fromP = label "from" $ wordP "from" *> moduleRefP
 
 importSpecP :: Parser ImportSpec
 importSpecP = plainP <|> renamedP
@@ -491,44 +623,69 @@ importSpecP = plainP <|> renamedP
       Ident n <- identP
       ImportSpec n <$> optional (asP *> identP)
     renamedP = do
-      n <- nameP
+      n <- nameP <|> stringP
       asP
       ImportSpec n . Just <$> identP
 
-exportSpecP :: Parser ExportSpec
-exportSpecP = ExportSpec <$> nameP <*> optional (asP *> nameP)
+importBindsP :: Parser ImportBinds
+importBindsP = namedP <|> namespaceP
+  where
+    namedP = ImpNamed <$> curlyP (commasP importSpecP)
+    namespaceP = do
+      symP "*"
+      asP
+      ImpNamespace <$> identP
+
+importClauseP :: Parser ImportClause
+importClauseP = defaultP <|> bindsP
+  where
+    defaultP = do
+      d <- identP
+      binds <- optional (commaP *> importBindsP)
+      return (ImportClause (Just d) binds)
+    bindsP = ImportClause Nothing . Just <$> importBindsP
 
 importE :: Parser Expr
 importE = label "import" $ do
   try $ keyP "import" <* notFollowedBy (void (bracketP '(') <|> void (symP "."))
-  choice [ bareP, namedP, namespaceP ]
-    where
-      bareP = EImport ImpBare <$> stringP
-      namedP = do
-        specs <- curlyP (commasP importSpecP)
-        EImport (ImpNamed specs) <$> fromP
-      namespaceP = do
-         symP "*"
-         asP
-         ns <- identP
-         EImport (ImpNamespace ns) <$> fromP
+  bareP <|> clauseP
+  where
+    bareP = EImport (ImportClause Nothing Nothing) <$> moduleRefP
+    clauseP = EImport <$> importClauseP <*> fromP
+
+exportNameP :: Parser String
+exportNameP = nameP <|> stringP
+
+exportSpecP :: Parser (Bool, ExportSpec)
+exportSpecP = do
+  isString <- option False (True <$ lookAhead stringP)
+  name <- exportNameP
+  alias <- optional (asP *> exportNameP)
+  return (isString, ExportSpec name alias)
 
 exportE :: Parser Expr
 exportE = label "export" $ do
   keyP "export"
   choice
     [ EExportDecl <$> choice [ declE, classE ]
+    , defaultP
     , namedP
     , allP
     ]
     where
+      defaultP = do
+        wordP "default"
+        notFollowedBy (keyP "let" <|> keyP "const")
+        EExportDefault <$> exprE
       namedP = do
-        specs <- curlyP (commasP exportSpecP)
+        pairs <- curlyP (commasP exportSpecP)
         mFrom <- optional fromP
-        return $ EExport (ExpNamed specs) mFrom
+        if isNothing mFrom && any fst pairs
+          then fail "a string export name needs `from`"
+          else return (EExport (ExpNamed (fmap snd pairs)) mFrom)
       allP = do
         symP "*"
-        clause <- (ExpAllAs <$> (asP *> nameP)) <|> return ExpAll
+        clause <- (ExpAllAs <$> (asP *> exportNameP)) <|> return ExpAll
         EExport clause . Just <$> fromP
 
 blockE :: Parser Expr
@@ -554,7 +711,7 @@ forE :: Parser Expr
 forE = label "for" $ do
   keyP "for"
   isAwait <- isJust <$> optional (keyP "await")
-  pat     <- exprE
+  pat     <- opE
   wordP "of"
   iter    <- exprE
   EFor isAwait pat iter <$> doBodyP

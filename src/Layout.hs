@@ -13,8 +13,11 @@ data LayoutError
   | UnexpectedEOF
   deriving (Eq, Show)
 
-getLne :: TokInfo -> Int
-getLne tok = if tok.tokVal == TEOF then 0 else unPos . sourceLine . tokStart $ tok
+startLine :: TokInfo -> Int
+startLine = unPos . sourceLine . tokStart
+
+endLine :: TokInfo -> Int
+endLine = unPos . sourceLine . tokEnd
 
 getCol :: TokInfo -> Int
 getCol = unPos . sourceColumn . tokStart
@@ -26,11 +29,11 @@ preLay :: [TokInfo] -> [TokInfo]
 preLay (curr : rest@(next : _))
   | elem curr.tokVal [TKey "do", TKey "where"] && next.tokVal /= TBracket '{'
     = curr : withInfo next (TLayBrace (getCol next)) : preLay rest
-  | getLne curr < getLne next
+  | next.tokVal /= TEOF && endLine curr < startLine next
     = curr : withInfo next (TLayAngle (getCol next)) : preLay rest
   | otherwise
     = curr : preLay rest
-preLay (curr : []) = [curr]
+preLay [curr] = [curr]
 preLay []          = []
 
 pattern V :: Tok -> TokInfo
@@ -78,7 +81,7 @@ lay (t@(V (TBracket ']')) : ts) (ExplSquare : ms) = (t :) <$> lay ts ms
 lay (t@(V (TBracket c)) : _) (m : _)
   | elem c "})]" && m <= 0                        = Left (MismatchedClose (tokStart t))
 lay (t@(V (TBracket c)) : _) _
-  | elem c "})]"                                  = Left (UnmatchedClose (tokStart t))
+  | c `elem` "})]"                                  = Left (UnmatchedClose (tokStart t))
 
 -- reached eof
 lay (t@(V TEOF) : _) ms                           = closeAll t ms

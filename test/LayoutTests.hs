@@ -2,7 +2,7 @@ module LayoutTests (tests) where
 
 import Test.HUnit
 
-import Lexer (TokInfo(tokVal), Tok(..), runLex, sm, oa, ca, ob, cb, op, cp, oq, cq, dk, wk)
+import Lexer (TokInfo(tokVal), Tok(..), Lit(..), runLex, sm, oa, ca, ob, cb, op, cp, oq, cq, dk, wk)
 import Layout
 
 ok :: String -> [Tok] -> Test
@@ -32,7 +32,7 @@ g = TIden "g"
 
 tests :: Test
 tests = TestList $
-  concat [basics, continuation, implicitBlocks, explicitBraces, brackets, mixed, fails]
+  concat [basics, continuation, implicitBlocks, explicitBraces, brackets, mixed, multilineTokens, fails]
 
 basics :: [Test]
 basics =
@@ -120,6 +120,15 @@ mixed =
   [ ok "f(do\n  a\n)" [oa, f, op, dk, oa, a, ca, cp, ca, TEOF]
   , ok "[do\n  a\n]" [oa, oq, dk, oa, a, ca, cq, ca, TEOF]
   ]
+
+multilineTokens :: [Test]
+multilineTokens =
+  [ ok "x = \"a\nb\".trim()" [oa, x, TSym "=", ml, TSym ".", TIden "trim", op, cp, ca, TEOF]
+  , ok "x = \"a\nb\"\ny" [oa, x, TSym "=", ml, sm, y, ca, TEOF]
+  , ok "do\n  x = \"a\nb\"\n  y" [oa, dk, oa, x, TSym "=", ml, sm, y, ca, ca, TEOF]
+  ]
+  where
+  ml = TLit (LStr "a\nb")
 
 fails :: [Test]
 fails = fmap layFail
