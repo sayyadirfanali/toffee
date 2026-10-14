@@ -4,7 +4,7 @@ import Expr
 import Lexer (litDat)
 
 render :: Expr -> String
-render = \case
+render ex = case ex.exNode of
   ELit l            -> litDat l
   EIden (Ident s)   -> s
   EPriv (Ident s)   -> '#' : s

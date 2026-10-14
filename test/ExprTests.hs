@@ -5,7 +5,7 @@ import Prelude hiding (exp)
 import Test.HUnit
 import Data.List (isInfixOf)
 import qualified Data.List.NonEmpty as NE
-import Text.Megaparsec (errorBundlePretty, bundleErrors, parseErrorTextPretty)
+import Text.Megaparsec (errorBundlePretty, bundleErrors, parseErrorTextPretty, sourceColumn, sourceLine, unPos)
 
 import Expr
 import Layout (layout)
@@ -56,6 +56,27 @@ badTop inp = TestCase $ case parseTop inp of
   Left _   -> return ()
   Right es -> assertFailure ("expected failure on " <> show inp <> ", got " <> show (fmap render es))
 
+offsets :: Expr -> (Int, Int)
+offsets e = (e.exSpan.spStartOff, e.exSpan.spEndOff)
+
+-- character offsets of the whole expression
+spanOk :: String -> (Int, Int) -> Test
+spanOk inp exp = TestCase $ case parseExpr inp of
+  Left err -> assertFailure ("parse failed on " <> show inp <> ": " <> err)
+  Right e  -> offsets e @?= exp
+
+-- character offsets of each top-level expression, after layout
+topSpans :: String -> [(Int, Int)] -> Test
+topSpans inp exp = TestCase $ case parseTop inp of
+  Left err -> assertFailure ("failed on " <> show inp <> ": " <> err)
+  Right es -> fmap offsets es @?= exp
+
+-- line and column where the expression starts
+startOk :: String -> (Int, Int) -> Test
+startOk inp exp = TestCase $ case parseExpr inp of
+  Left err -> assertFailure ("parse failed on " <> show inp <> ": " <> err)
+  Right e  -> (unPos (sourceLine e.exSpan.spStart), unPos (sourceColumn e.exSpan.spStart)) @?= exp
+
 tests :: Test
 tests = TestList $ concat
   [ atoms, arrays, objects, objectMethods, literalNames, postfix, privateMembers, spreadArgs, newTests
@@ -63,7 +84,7 @@ tests = TestList $ concat
   , lambdas, params, asyncs, trailingCommas
   , conditionals, tries, throws, assignment, declarations, patterns, keywordBindings
   , classes, reservedMembers, imports, exports, blocks, loops, grouping
-  , tsGone, topLevel, blockEnds, topFailures
+  , tsGone, topLevel, blockEnds, topFailures, spans
   ]
 
 atoms :: [Test]
@@ -1135,4 +1156,43 @@ topFailures =
   , badTop "class A where\n  x = 1\n y"
   , badTop "import { a }\n  from \"m\"\nx y"
   , badTop "x\n++"
+  ]
+
+spans :: [Test]
+spans =
+  [ spanOk "x" (0, 1)
+  , spanOk "  x" (2, 3)
+  , spanOk "\"a\\nb\"" (0, 6)
+  , spanOk "a + b" (0, 5)
+  , spanOk "a + b * c" (0, 9)
+  , spanOk "a ?? b ?? c" (0, 11)
+  , spanOk "a ** b" (0, 6)
+  , spanOk "-x" (0, 2)
+  , spanOk "a.b.c" (0, 5)
+  , spanOk "f(x)" (0, 4)
+  , spanOk "a?.[0]" (0, 6)
+  , spanOk "new Foo(x).y" (0, 12)
+  , spanOk "(a)" (0, 3)
+  , spanOk "(a).b" (0, 5)
+  , spanOk "((a))" (0, 5)
+  , spanOk "(a + b) * c" (0, 11)
+  , spanOk "x = y + 1" (0, 9)
+  , spanOk "if a then b else c" (0, 18)
+  , spanOk "fn(x) => x + 1" (0, 14)
+  , spanOk "do { a; b }" (0, 11)
+  , spanOk "let x = 1" (0, 9)
+  , spanOk "class A where {}" (0, 16)
+  , spanOk "import { a } from \"m\"" (0, 21)
+  , spanOk "return" (0, 6)
+
+  -- layout tokens never extend a span
+  , topSpans "do\n  a\nb" [(0, 6), (7, 8)]
+  , topSpans "x = do\n  a\n  b" [(0, 14)]
+  , topSpans "x\ndo\ny" [(0, 1), (2, 4), (5, 6)]
+  , topSpans "f(\n  a,\n  b\n)" [(0, 13)]
+  , topSpans "class A where\n  x = 1\ny" [(0, 21), (22, 23)]
+
+  -- columns count a tab as 8, offsets count it as 1
+  , startOk "\tx" (1, 9)
+  , spanOk "\tx" (1, 2)
   ]

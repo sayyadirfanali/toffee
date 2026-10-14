@@ -30,7 +30,14 @@ lexeme p = p <* skipSpace
 symbol :: String -> Lexer String
 symbol s = string s <* notFollowedBy (satisfy identBody)
 
-data TokInfo = TokInfo { tokStart :: SourcePos, tokEnd :: SourcePos, tokStr :: String, tokVal :: Tok }
+data TokInfo = TokInfo
+  { tokStart    :: SourcePos
+  , tokEnd      :: SourcePos
+  , tokStartOff :: Int
+  , tokEndOff   :: Int
+  , tokStr      :: String
+  , tokVal      :: Tok
+  }
   deriving (Eq, Ord, Show)
 
 instance VisualStream [TokInfo] where
@@ -306,18 +313,21 @@ semiL = label "semicolon" $ do
 
 mkTokInfo :: Lexer Tok -> Lexer TokInfo
 mkTokInfo p = do
-  s <- getSourcePos
-  t <- p
-  e <- getSourcePos
-  return TokInfo { tokStart = s, tokEnd = e, tokStr = tokDat t, tokVal = t }
+  s  <- getSourcePos
+  so <- getOffset
+  t  <- p
+  e  <- getSourcePos
+  eo <- getOffset
+  return TokInfo { tokStart = s, tokEnd = e, tokStartOff = so, tokEndOff = eo, tokStr = tokDat t, tokVal = t }
 
 lexer :: Lexer [TokInfo]
 lexer = do
   skipSpace
   tokInfo <- many . lexeme . mkTokInfo . choice $ [ keyL, litL, symL, braL, semiL, privL, idenL ]
   pos <- getSourcePos
+  off <- getOffset
   eof
-  return $ tokInfo ++ [TokInfo { tokStart = pos, tokEnd = pos, tokStr = [], tokVal = TEOF }]
+  return $ tokInfo ++ [TokInfo { tokStart = pos, tokEnd = pos, tokStartOff = off, tokEndOff = off, tokStr = [], tokVal = TEOF }]
 
 runLex :: String -> Either (ParseErrorBundle String Void) [TokInfo]
 runLex = runParser lexer ""

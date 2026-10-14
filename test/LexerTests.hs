@@ -19,6 +19,9 @@ lexFail inp = TestCase $ case runLex inp of
   Left _    -> return ()
   Right out -> assertFailure ("expected lex failure on " <> show inp <> ", got " <> show (fmap tokVal out))
 
+offsets :: TokInfo -> (Int, Int)
+offsets t = (tokStartOff t, tokEndOff t)
+
 lineCol :: TokInfo -> (Int, Int)
 lineCol t = (unPos (sourceLine (tokStart t)), unPos (sourceColumn (tokStart t)))
 
@@ -262,4 +265,10 @@ positions =
   , lexWith "\tx"         $ \r -> fmap lineCol (take 1 r) @?= [(1, 9)]
   , lexWith ">>>= typeof" $ \r -> fmap tokStr (take 2 r) @?= [">>>=", "typeof"]
   , lexWith "r\"\\d+\"gi" $ \r -> fmap tokStr (take 1 r) @?= ["r\"\\d+\"gi"]
+
+  -- character offsets, independent of the 8-column tab width
+  , lexWith "a  bc"       $ \r -> fmap offsets r @?= [(0, 1), (3, 5), (5, 5)]
+  , lexWith "\tx"         $ \r -> fmap offsets r @?= [(1, 2), (2, 2)]
+  , lexWith "a // c\nb"   $ \r -> fmap offsets r @?= [(0, 1), (7, 8), (8, 8)]
+  , lexWith "\"a\\nb\" x" $ \r -> fmap offsets r @?= [(0, 6), (7, 8), (8, 8)]
   ]

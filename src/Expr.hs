@@ -190,7 +190,7 @@ data FuncSig = FuncSig
 data TryCatch = TryCatch (Maybe Expr) Expr
   deriving (Eq, Ord, Show)
 
-data Expr
+data ExprNode
   = ELit        Lit
   | EIden       Ident
   | EPriv       Ident
@@ -238,6 +238,59 @@ data Expr
   | EContinue
   | EReturn     (Maybe Expr)
   deriving (Eq, Ord, Show)
+
+-- source span of an expression; offsets are character offsets into the source
+data Span = Span
+  { spStart    :: SourcePos
+  , spEnd      :: SourcePos
+  , spStartOff :: Int
+  , spEndOff   :: Int
+  }
+  deriving (Eq, Ord, Show)
+
+data Expr = Expr
+  { exSpan :: Span
+  , exNode :: ExprNode
+  }
+  deriving (Eq, Ord, Show)
+
+joinSpan :: Span -> Span -> Span
+joinSpan a b = Span a.spStart b.spEnd a.spStartOff b.spEndOff
+
+-- layout tokens and semicolons carry the position of a neighbouring token, so they never bound a span
+isSourceTok :: TokInfo -> Bool
+isSourceTok t = notElem t.tokVal [TBracket '<', TBracket '>', TSemiColon]
+
+tokSpan :: [TokInfo] -> Span
+tokSpan toks = case filter isSourceTok toks of
+  []         -> Span (initialPos "") (initialPos "") 0 0
+  ts@(t : _) -> let l = last ts in Span t.tokStart l.tokEnd t.tokStartOff l.tokEndOff
+
+spanned :: Parser a -> Parser (Span, a)
+spanned p = do
+  input <- getInput
+  o0 <- getOffset
+  x <- p
+  o1 <- getOffset
+  return (tokSpan (take (o1 - o0) input), x)
+
+located :: Parser ExprNode -> Parser Expr
+located p = uncurry Expr <$> spanned p
+
+-- a postfix operation spans from its operand to its own last token
+postE :: Parser (Expr -> ExprNode) -> Parser (Expr -> Expr)
+postE p = do
+  (sp, f) <- spanned p
+  return $ \x -> Expr (joinSpan x.exSpan sp) (f x)
+
+binE :: BinOp -> Expr -> Expr -> Expr
+binE o a b = Expr (joinSpan a.exSpan b.exSpan) (EBinOp o a b)
+
+-- the span of a parenthesised expression includes its parentheses
+parenE :: Parser Expr
+parenE = do
+  (sp, e) <- spanned (parenP exprE)
+  return e { exSpan = sp }
 
 colP :: Parser String
 colP = symP ":"
@@ -351,13 +404,13 @@ keyColP = choice
   ]
 
 litE :: Parser Expr
-litE = label "literal" $ ELit <$> litP
+litE = label "literal" $ located (ELit <$> litP)
 
 identE :: Parser Expr
-identE = label "identifier" $ EIden <$> identP
+identE = label "identifier" $ located (EIden <$> identP)
 
 privInE :: Parser Expr
-privInE = label "private name" $ EPriv . Ident <$> privP <* lookAhead (keyP "in")
+privInE = label "private name" $ located (EPriv . Ident <$> privP <* lookAhead (keyP "in"))
 
 importArgsP :: Parser [Elem]
 importArgsP = do
@@ -367,14 +420,14 @@ importArgsP = do
     [ElemPlain _, ElemPlain _] -> return args
     _                          -> fail "import() takes a module specifier and an optional options object"
 
-importMetaP :: Parser Expr
+importMetaP :: Parser ExprNode
 importMetaP = EImportMeta <$ (symP "." *> wordP "meta")
 
 importExprE :: Parser Expr
-importExprE = keyP "import" *> choice [ EImportCall <$> importArgsP, importMetaP ]
+importExprE = located (keyP "import" *> choice [ EImportCall <$> importArgsP, importMetaP ])
 
 importMetaE :: Parser Expr
-importMetaE = keyP "import" *> importMetaP
+importMetaE = located (keyP "import" *> importMetaP)
 
 elemE :: Parser Elem
 elemE = label "element" $ choice [ ElemSpread <$> (dotsP *> exprE), ElemPlain <$> exprE ]
@@ -383,10 +436,10 @@ argsP :: Parser [Elem]
 argsP = parenP (commasP elemE)
 
 arrE :: Parser Expr
-arrE = label "array" $ EArr <$> squareP (commasP elemE)
+arrE = label "array" $ located (EArr <$> squareP (commasP elemE))
 
 objE :: Parser Expr
-objE = label "object" $ EObj <$> curlyP (commasP objFieldP)
+objE = label "object" $ located (EObj <$> curlyP (commasP objFieldP))
 
 objFieldP :: Parser ObjField
 objFieldP = choice [ spreadP, methodP, keyValP, shortP ]
@@ -413,10 +466,10 @@ funcsigP :: Parser FuncSig
 funcsigP = fnHeadP >>= sigTailP
 
 lamE :: Parser Expr
-lamE = label "lambda" $ ELam <$> funcsigP <* fatP <*> exprE
+lamE = label "lambda" $ located (ELam <$> funcsigP <* fatP <*> exprE)
 
 ifthenE :: Parser Expr
-ifthenE = label "if then" $ do
+ifthenE = label "if then" $ located $ do
   keyP "if"
   cond <- exprE
   keyP "then"
@@ -426,7 +479,7 @@ ifthenE = label "if then" $ do
   return $ EIfThen cond expThen expElse
 
 tryE :: Parser Expr
-tryE = label "try" $ do
+tryE = label "try" $ located $ do
   keyP "try"
   body <- exprE
   mCatch <- optional catchP
@@ -444,24 +497,24 @@ tryE = label "try" $ do
 
 throwE :: Parser Expr
 throwE = label "throw" $
-  EThrow <$> (keyP "throw" *> exprE)
+  located (EThrow <$> (keyP "throw" *> exprE))
 
 memE :: Parser (Expr -> Expr)
-memE = label "member" $ do
+memE = label "member" $ postE $ do
   symP "."
   m <- memNameP
   return $ \x -> EMem x m
 
 appE :: Parser (Expr -> Expr)
 appE = label "application" $
-  flip EApp <$> argsP
+  postE (flip EApp <$> argsP)
 
 indexE :: Parser (Expr -> Expr)
 indexE = label "index" $
-  flip EIndex <$> squareP exprE
+  postE (flip EIndex <$> squareP exprE)
 
 optPostE :: Parser (Expr -> Expr)
-optPostE = label "optional" $ do
+optPostE = label "optional" $ postE $ do
   symP "?."
   choice
     [ flip EOptMem   <$> memNameP
@@ -470,7 +523,7 @@ optPostE = label "optional" $ do
     ]
 
 newE :: Parser Expr
-newE = label "new" $ do
+newE = label "new" $ located $ do
   keyP "new"
   newTargetP <|> newCallP
   where
@@ -483,7 +536,7 @@ newE = label "new" $ do
 
 newCalleeE :: Parser Expr
 newCalleeE = do
-  prim  <- choice [ newE, identE, litE, arrE, objE, importMetaE, parenP exprE ]
+  prim  <- choice [ newE, identE, litE, arrE, objE, importMetaE, parenE ]
   postL <- many (choice [ memE, indexE ])
   return (foldl (&) prim postL)
 
@@ -495,7 +548,7 @@ incDecP = choice
 
 postfixE :: Parser Expr
 postfixE = do
-  prim  <- choice [ newE, identE, litE, arrE, objE, privInE, importExprE, parenP exprE ]
+  prim  <- choice [ newE, identE, litE, arrE, objE, privInE, importExprE, parenE ]
   postL <- many (choice [ optPostE, memE, appE, indexE ])
   incDecP <|> return ()
   return (foldl (&) prim postL)
@@ -514,14 +567,14 @@ unopP = label "unary operator" $ choice
 
 unaryE :: Parser Expr
 unaryE = choice
-  [ EUnOp <$> unopP <*> unaryE
+  [ located (EUnOp <$> unopP <*> unaryE)
   , incDecP
   , postfixE
   ]
 
 expE :: Parser Expr
 expE = choice
-  [ EUnOp <$> unopP <*> unaryE
+  [ located (EUnOp <$> unopP <*> unaryE)
   , incDecP
   , powE
   ]
@@ -529,13 +582,13 @@ expE = choice
 powE :: Parser Expr
 powE = do
   base <- postfixE
-  option base (EBinOp Pow base <$> (symP "**" *> expE))
+  option base (binE Pow base <$> (symP "**" *> expE))
 
 bitE :: Parser Expr
 bitE = makeExprParser expE table
   where
-    binop o = EBinOp o <$ symP (binop2str o)
-    kbin o = EBinOp o <$ keyP (binop2str o)
+    binop o = binE o <$ symP (binop2str o)
+    kbin o = binE o <$ keyP (binop2str o)
 
     table =
       [ [ InfixL (binop Mul), InfixL (binop Div), InfixL (binop Mod) ]
@@ -553,20 +606,20 @@ andP :: Expr -> Parser Expr
 andP x = option x $ do
   symP "&&"
   y <- bitE
-  EBinOp And x <$> andP y
+  binE And x <$> andP y
 
 orP :: Expr -> Parser Expr
 orP x = option x $ do
   symP "||"
   y <- bitE >>= andP
-  EBinOp Or x <$> orP y
+  binE Or x <$> orP y
 
 coalesceP :: Expr -> Parser Expr
 coalesceP x = do
   symP "??"
   y <- bitE
   rest <- option y (coalesceP y)
-  return (EBinOp Coalesce x rest)
+  return (binE Coalesce x rest)
 
 opE :: Parser Expr
 opE = do
@@ -590,7 +643,7 @@ classBodyP :: Parser [ClassMem]
 classBodyP = keyP "where" *> (snd <$> blockOf classMemP)
 
 classE :: Parser Expr
-classE = label "class" $ do
+classE = label "class" $ located $ do
   keyP "class"
   name <- optional identP
   ext  <- optional (keyP "extends" *> postfixE)
@@ -646,7 +699,7 @@ importClauseP = defaultP <|> bindsP
     bindsP = ImportClause Nothing . Just <$> importBindsP
 
 importE :: Parser Expr
-importE = label "import" $ do
+importE = label "import" $ located $ do
   try $ keyP "import" <* notFollowedBy (void (bracketP '(') <|> void (symP "."))
   bareP <|> clauseP
   where
@@ -664,7 +717,7 @@ exportSpecP = do
   return (isString, ExportSpec name alias)
 
 exportE :: Parser Expr
-exportE = label "export" $ do
+exportE = label "export" $ located $ do
   keyP "export"
   choice
     [ EExportDecl <$> choice [ declE, classE ]
@@ -689,26 +742,26 @@ exportE = label "export" $ do
         EExport clause . Just <$> fromP
 
 blockE :: Parser Expr
-blockE = do
+blockE = located $ do
   k         <- keyP "where" <|> keyP "do"
   (typ, xs) <- blockOf exprE
   return (EBlock typ (BlockKey k) xs)
 
 declE :: Parser Expr
-declE = do
+declE = located $ do
   key <- keyP "let" <|> keyP "const"
   pat <- opE
   symP "="
   EDecl (if key == "let" then LetDecl else ConstDecl) pat <$> exprE
 
 doBodyP :: Parser Expr
-doBodyP = do
+doBodyP = located $ do
   keyP "do"
   (typ, xs) <- blockOf exprE
   return (EBlock typ (BlockKey "do") xs)
 
 forE :: Parser Expr
-forE = label "for" $ do
+forE = label "for" $ located $ do
   keyP "for"
   isAwait <- isJust <$> optional (keyP "await")
   pat     <- opE
@@ -717,16 +770,16 @@ forE = label "for" $ do
   EFor isAwait pat iter <$> doBodyP
 
 whileE :: Parser Expr
-whileE = label "while" $ keyP "while" *> (EWhile <$> exprE <*> doBodyP)
+whileE = label "while" $ located (keyP "while" *> (EWhile <$> exprE <*> doBodyP))
 
 returnE :: Parser Expr
-returnE = label "return" $ keyP "return" *> (EReturn <$> optional exprE)
+returnE = label "return" $ located (keyP "return" *> (EReturn <$> optional exprE))
 
 breakE :: Parser Expr
-breakE    = EBreak    <$ keyP "break"
+breakE    = located (EBreak <$ keyP "break")
 
 continueE :: Parser Expr
-continueE = EContinue <$ keyP "continue"
+continueE = located (EContinue <$ keyP "continue")
 
 opOrAsE :: Parser Expr
 opOrAsE = do
@@ -736,7 +789,7 @@ opOrAsE = do
     assignE lhs = label "assignment" $ do
       o <- choice . fmap opP $ [minBound .. maxBound]
       rhs <- exprE
-      return (EAssign o lhs rhs)
+      return (Expr (joinSpan lhs.exSpan rhs.exSpan) (EAssign o lhs rhs))
     opP o = o <$ symP (assignop2str o)
 
 exprE :: Parser Expr
