@@ -21,6 +21,24 @@ layFail s = TestCase $
       Left _    -> return ()
       Right ts' -> assertFailure ("expected layout failure on " <> show s <> ", got " <> show (fmap tokVal ts'))
 
+-- fails with the error the predicate accepts
+layFailWith :: String -> (LayoutError -> Bool) -> String -> Test
+layFailWith name isErr s = TestCase $
+  case runLex s of
+    Left e   -> assertFailure ("lex failed on " <> show s <> ": " <> show e)
+    Right ts -> case layout ts of
+      Left e | isErr e -> return ()
+      Left e    -> assertFailure ("expected " <> name <> " on " <> show s <> ", got " <> show e)
+      Right ts' -> assertFailure ("expected " <> name <> " on " <> show s <> ", got " <> show (fmap tokVal ts'))
+
+isCloseInBlock :: LayoutError -> Bool
+isCloseInBlock (CloseInBlock _) = True
+isCloseInBlock _                = False
+
+isUnmatchedClose :: LayoutError -> Bool
+isUnmatchedClose (UnmatchedClose _) = True
+isUnmatchedClose _                  = False
+
 a, b, c, x, y, f, g :: Tok
 a = TIden "a"
 b = TIden "b"
@@ -32,7 +50,7 @@ g = TIden "g"
 
 tests :: Test
 tests = TestList $
-  concat [basics, continuation, implicitBlocks, explicitBraces, brackets, mixed, multilineTokens, fails]
+  concat [basics, continuation, implicitBlocks, explicitBraces, brackets, mixed, blockEnds, multilineTokens, fails]
 
 basics :: [Test]
 basics =
@@ -121,6 +139,32 @@ mixed =
   , ok "[do\n  a\n]" [oa, oq, dk, oa, a, ca, cq, ca, TEOF]
   ]
 
+-- an implicit block runs to the end of its last line
+blockEnds :: [Test]
+blockEnds =
+  [ ok "f(do { a })" [oa, f, op, dk, ob, a, cb, cp, ca, TEOF]
+  , ok "if c then do\n    a\n  else b" [oa, TKey "if", c, TKey "then", dk, oa, a, ca, TKey "else", b, ca, TEOF]
+  , ok "try do\n    a\n  catch => b" [oa, TKey "try", dk, oa, a, ca, TKey "catch", TSym "=>", b, ca, TEOF]
+  , ok "f(do\n    a\n  , b)" [oa, f, op, dk, oa, a, ca, TSym ",", b, cp, ca, TEOF]
+  , ok "do if a then b else c" [oa, dk, oa, TKey "if", a, TKey "then", b, TKey "else", c, ca, ca, TEOF]
+  ]
+  <> fmap (layFailWith "CloseInBlock" isCloseInBlock)
+  [ "f(do a)"
+  , "[do a]"
+  , "{ do a }"
+  , "f(x, do a)"
+  , "(do a]"
+  , "f(do\n  a\n  b)"
+  , "{ do\n    a\n    b }"
+  , "f(do\n  a)"
+  ]
+  <> fmap (layFailWith "UnmatchedClose" isUnmatchedClose)
+  [ ")"
+  , "a)"
+  , "do\n  a)"
+  , "do a]"
+  ]
+
 multilineTokens :: [Test]
 multilineTokens =
   [ ok "x = \"a\nb\".trim()" [oa, x, TSym "=", ml, TSym ".", TIden "trim", op, cp, ca, TEOF]
@@ -135,8 +179,5 @@ fails = fmap layFail
   [ ")", "]", "}", "a)", "(a))"
   , "(]", "[)", "{)", "(}"
   , "f(a", "[a", "{a", "((a)", "do { a"
-  , "f(do\n  a\n  b)"
-  , "f(do a)"
-  , "{ do\n    a\n    b }"
   , "do\n  a)"
   ]

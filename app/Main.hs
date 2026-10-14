@@ -1,12 +1,13 @@
 module Main where
 
-import qualified Expr as E
-import qualified Lexer as L
-import qualified Layout as Y
-import qualified Parser as P
-import Data.Void
-import System.Environment
-import Text.Megaparsec
+import Data.Void (Void)
+import System.Environment (getArgs)
+import Text.Megaparsec (ParseError, bundleErrors, errorBundlePretty, errorOffset, parseErrorTextPretty, sourcePosPretty)
+
+import Expr (programP)
+import Layout (layout, preLay)
+import Lexer (TokInfo (tokStart, tokVal), runLex)
+import Parser (runParse)
 
 main :: IO ()
 main = do
@@ -16,31 +17,28 @@ main = do
         []      -> "example.txt"
   s <- readFile file
 
-  case L.runLex s of
+  case runLex s of
     Left lexErr -> putStr (errorBundlePretty lexErr)
     Right lexVal -> do
       section "lexer"
-      mapM_ (print . L.tokVal) lexVal
+      mapM_ (print . tokVal) lexVal
       section "preLay"
-      mapM_ (print . L.tokVal) (Y.preLay lexVal)
-      case Y.layout lexVal of
+      mapM_ (print . tokVal) (preLay lexVal)
+      case layout lexVal of
         Left layErr -> print layErr
         Right layVal -> do
           section "layout"
-          mapM_ (print . L.tokVal) layVal
+          mapM_ (print . tokVal) layVal
           section "parser"
-          case P.runParse topP layVal of
+          case runParse programP layVal of
             Left bundle -> mapM_ (report layVal) (bundleErrors bundle)
             Right exprs -> mapM_ print exprs
 
 section :: String -> IO ()
 section name = putStrLn ("--- " ++ name ++ " ---")
 
-topP :: P.Parser [E.Expr]
-topP = P.bracketP '<' *> sepEndBy E.exprE P.semicolonP <* P.bracketP '>' <* P.eofP
-
-report :: [L.TokInfo] -> ParseError [L.TokInfo] Void -> IO ()
+report :: [TokInfo] -> ParseError [TokInfo] Void -> IO ()
 report toks err = do
   let i   = min (errorOffset err) (length toks - 1)
-      pos = L.tokStart (toks !! i)
+      pos = tokStart (toks !! i)
   putStr (sourcePosPretty pos ++ ": " ++ parseErrorTextPretty err)

@@ -49,9 +49,11 @@ pattern ExplSquare :: Int
 pattern ExplSquare = - 2
 
 -- NB: copied as directly as possible from Haskell Report Section 10.3.
--- only difference is that @parse-error(t)@ rule is omitted to make it simpler
--- unlike Haskell, ToffeeScript has no juxtaposition application (@f x@ is not allowed)
--- so two adjacent expressions with no separator are always a parse error
+-- The only difference is that the @parse-error(t)@ rule is omitted.
+-- So an implicit block closes only on a dedent or at eof, which means it always runs to the end of its last line.
+-- Any token after the block must start on a new, less-indented line, or the block must use braces.
+-- E.g. @f(do a)@, @map(fn(x) => do a, xs)@ and @if c then do a else b@ are rejected, while @f(do { a })@ is fine.
+-- A closing bracket inside an implicit block is reported as 'CloseInBlock'.
 lay :: [TokInfo] -> [Int] -> Either LayoutError [TokInfo]
 -- inside implicit context
 lay (t@(V (TLayAngle n)) : ts) (m : ms)
@@ -78,8 +80,9 @@ lay (t@(V (TBracket '[')) : ts) ms                = (t :) <$> lay ts (ExplSquare
 lay (t@(V (TBracket '}')) : ts) (ExplCurly : ms)  = (t :) <$> lay ts ms
 lay (t@(V (TBracket ')')) : ts) (ExplParen : ms)  = (t :) <$> lay ts ms
 lay (t@(V (TBracket ']')) : ts) (ExplSquare : ms) = (t :) <$> lay ts ms
-lay (t@(V (TBracket c)) : _) (m : _)
+lay (t@(V (TBracket c)) : _) (m : ms)
   | elem c "})]" && m <= 0                        = Left (MismatchedClose (tokStart t))
+  | elem c "})]" && any (<= 0) ms                 = Left (CloseInBlock (tokStart t))
 lay (t@(V (TBracket c)) : _) _
   | c `elem` "})]"                                  = Left (UnmatchedClose (tokStart t))
 

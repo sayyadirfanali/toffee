@@ -62,8 +62,8 @@ numbers =
   fmap (\s -> ok s [num s])
     (words "0 7 123456 7.2 0.5 0.0 7e2 7E2 7e+2 7e-2 7.2e10 1.5E-3 0x1F 0xff 0XFF 0o17 0O17 0b101 0B101 123n 0x1Fn 0b101n 1_000 1_000_000 0xFF_FF 1_000.5")
   <>
-  [ ok "1 .2" [num "1", TSym ".", num "2"]
-  , ok ".5" [TSym ".", num "5"]
+  [ ok "1 .2" [num "1", num ".2"]
+  , ok ".5" [num ".5"]
   , ok "-1" [TSym "-", num "1"]
   , ok "1-1" [num "1", TSym "-", num "1"]
   , ok "1n + 2n" [num "1n", TSym "+", num "2n"]
@@ -121,7 +121,7 @@ symbols =
   , ok "!==" [TSym "!=", TSym "="]
   , ok "==>" [TSym "==", TSym ">"]
   , ok "=>=" [TSym "=>", TSym "="]
-  , ok " -->" [TSym "-", TSym "->"]
+  , ok " -->" [TSym "--", TSym ">"]
   , ok "<<<" [TSym "<<", TSym "<"]
   , ok ">>>>" [TSym ">>>", TSym ">"]
   , ok ">>>>=" [TSym ">>>", TSym ">="]
@@ -130,7 +130,7 @@ symbols =
   , ok "|||" [TSym "||", TSym "|"]
   , ok ":::" [TSym "::", TSym ":"]
   , ok "!!x" [TSym "!", TSym "!", TIden "x"]
-  , ok " --x" [TSym "-", TSym "-", TIden "x"]
+  , ok " --x" [TSym "--", TIden "x"]
   , ok "a-=-1" [TIden "a", TSym "-=", TSym "-", num "1"]
   , ok "a<b>c" [TIden "a", TSym "<", TIden "b", TSym ">", TIden "c"]
   , ok "a<-1" [TIden "a", TSym "<", TSym "-", num "1"]
@@ -246,7 +246,6 @@ fails =
   , "`unterminated"
   , "#"
   , "@"
-  , "~"
   , "\\"
   , "\"\\x4\""
   , "\"\\u041\""

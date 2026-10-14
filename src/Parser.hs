@@ -14,9 +14,6 @@ satisfyP p = satisfy (p . tokVal)
 matchP :: (Tok -> Maybe a) -> Parser a
 matchP f = token (f . tokVal) Set.empty
 
-posP :: Parser SourcePos
-posP = tokStart <$> lookAhead anySingle
-
 singleP :: Tok -> Parser Tok
 singleP t = (tokVal <$> satisfyP (== t)) <?> tokDat t
 

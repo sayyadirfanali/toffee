@@ -5,16 +5,13 @@ import Prelude hiding (exp)
 import Test.HUnit
 import Data.List (isInfixOf)
 import qualified Data.List.NonEmpty as NE
-import Text.Megaparsec (errorBundlePretty, bundleErrors, parseErrorTextPretty, sepEndBy)
+import Text.Megaparsec (errorBundlePretty, bundleErrors, parseErrorTextPretty)
 
 import Expr
 import Layout (layout)
 import Lexer (TokInfo, runLex)
-import Parser
+import Parser (Parser, eofP, runParse)
 import Render (render)
-
-topP :: Parser [Expr]
-topP = bracketP '<' *> sepEndBy exprE semicolonP <* bracketP '>' <* eofP
 
 parseWith :: Parser a -> [TokInfo] -> Either String a
 parseWith p ts = case runParse p ts of
@@ -31,7 +28,7 @@ parseTop s = case runLex s of
   Left e   -> Left ("lex error: " <> errorBundlePretty e)
   Right ts -> case layout ts of
     Left e   -> Left ("layout error: " <> show e)
-    Right ys -> parseWith topP ys
+    Right ys -> parseWith programP ys
 
 ok :: String -> String -> Test
 ok inp exp = TestCase $ case parseExpr inp of
@@ -66,7 +63,7 @@ tests = TestList $ concat
   , lambdas, params, asyncs, trailingCommas
   , conditionals, tries, throws, assignment, declarations, patterns, keywordBindings
   , classes, reservedMembers, imports, exports, blocks, loops, grouping
-  , tsGone, topLevel, topFailures
+  , tsGone, topLevel, blockEnds, topFailures
   ]
 
 atoms :: [Test]
@@ -1100,6 +1097,30 @@ topLevel =
       [ "(while running (do (step) (if (done) (break) (tick))))" ]
   , top "const f = fn(x) => do\n  if x then return else log(x)\n  x"
       [ "(const f (fn (x) (do (if x (return) (log x)) x)))" ]
+  ]
+
+-- divergence: an implicit block runs to the end of its last line,
+-- so whatever follows it goes on a new, less-indented line, or the block uses braces
+blockEnds :: [Test]
+blockEnds =
+  [ top "f(do\n  a\n)" ["(f (do a))"]
+  , top "f(do { a })" ["(f (do a))"]
+  , top "map(fn(x) => do { a }, xs)" ["(map (fn (x) (do a)) xs)"]
+  , top "setTimeout(fn() => do\n    a\n  , 100)" ["(setTimeout (fn () (do a)) 100)"]
+  , top "if c then do { a } else b" ["(if c (do a) b)"]
+  , top "if c then do\n    a\n  else b" ["(if c (do a) b)"]
+  , top "try do\n    a\n  catch e => b" ["(try (do a) (catch e b))"]
+  , top "try do\n    a\n  finally b" ["(try (do a) (finally b))"]
+  , top "do if a then b else c" ["(do (if a b c))"]
+  , top "do try a catch e => b" ["(do (try a (catch e b)))"]
+
+  , badTop "f(do a)"
+  , badTop "[do a]"
+  , badTop "{ k: do a }"
+  , badTop "map(fn(x) => do a, xs)"
+  , badTop "if c then do a else b"
+  , badTop "try do a catch e => b"
+  , badTop "try do a finally b"
   ]
 
 topFailures :: [Test]

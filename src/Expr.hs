@@ -743,3 +743,6 @@ exprE :: Parser Expr
 exprE = choice
   [ lamE, ifthenE, tryE, forE, whileE, blockE, declE, classE
   , throwE, returnE, breakE, continueE, importE, exportE, opOrAsE ]
+
+programP :: Parser [Expr]
+programP = bracketP '<' *> sepEndBy exprE semicolonP <* bracketP '>' <* eofP
